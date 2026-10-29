@@ -1,10 +1,9 @@
-"""Imports LUS meter reads into Home Assistant long-term statistics."""
+"""Imports LUS meter reads and estimated costs into long-term statistics."""
 
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 import logging
-from zoneinfo import ZoneInfo
 
 import aiohttp
 
@@ -31,6 +30,7 @@ from .api import (
     FUEL_ELECTRICITY,
     FUEL_WASTE_WATER,
     FUEL_WATER,
+    HourlyUsage,
     LusAuthError,
     LusClient,
     LusError,
@@ -38,10 +38,9 @@ from .api import (
     to_hourly,
 )
 from .const import CHUNK_DAYS, DEFAULT_BACKFILL, DOMAIN, UPDATE_INTERVAL
+from .cost import SITE_TZ, Rates, cycle_bounds, electricity_costs, garbage_cost, water_costs
 
 _LOGGER = logging.getLogger(__name__)
-
-SITE_TZ = ZoneInfo("America/Chicago")
 
 # fuel type -> (label, unit, unit class)
 _FUELS = {
@@ -50,13 +49,34 @@ _FUELS = {
     FUEL_WASTE_WATER: ("wastewater", UnitOfVolume.GALLONS, VolumeConverter.UNIT_CLASS),
 }
 
+# Fuels that get a cost statistic. Wastewater is billed from the water meter's
+# gallons, so its charges are part of the water cost.
+_COST_FUNCTIONS = {
+    FUEL_ELECTRICITY: electricity_costs,
+    FUEL_WATER: water_costs,
+}
+
 type LusConfigEntry = ConfigEntry[LusCoordinator]
+
+# (start of the last stored hour, its running sum); (None, 0.0) if none stored.
+type LastStat = tuple[datetime | None, float]
 
 
 def statistic_id(meter: Meter) -> str:
     """Statistic id for a meter's consumption, e.g. lus:1000000001_electricity_consumption."""
     label = _FUELS[meter.fuel_type][0]
     return f"{DOMAIN}:{meter.utility_account_id}_{label}_consumption"
+
+
+def cost_statistic_id(meter: Meter) -> str:
+    """Statistic id for a meter's estimated cost, e.g. lus:1000000001_electricity_cost."""
+    label = _FUELS[meter.fuel_type][0]
+    return f"{DOMAIN}:{meter.utility_account_id}_{label}_cost"
+
+
+def total_cost_statistic_id(account_id: str) -> str:
+    """Statistic id for the account's estimated total bill."""
+    return f"{DOMAIN}:{account_id}_total_cost"
 
 
 class LusCoordinator(DataUpdateCoordinator[None]):
@@ -79,73 +99,150 @@ class LusCoordinator(DataUpdateCoordinator[None]):
         )
 
     async def _async_update_data(self) -> None:
+        rates = Rates.from_options(self.config_entry.options)
         try:
             await self.client.async_login()
-            meters = await self.client.async_get_meters()
+            meters = [
+                m for m in await self.client.async_get_meters() if m.fuel_type in _FUELS
+            ]
+            total_id = total_cost_statistic_id(self.client.account_id)
+            total_last = await self._async_last(total_id)
+            costs = []
             for meter in meters:
-                if meter.fuel_type not in _FUELS:
-                    _LOGGER.debug("Skipping unsupported fuel type %s", meter.fuel_type)
-                    continue
-                await self._async_import_meter(meter)
+                meter_costs = await self._async_import_meter(meter, rates, total_last)
+                if meter_costs is not None:
+                    costs.append(meter_costs)
         except LusAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (LusError, aiohttp.ClientError, TimeoutError) as err:
             raise UpdateFailed(str(err)) from err
 
-    async def _async_import_meter(self, meter: Meter) -> None:
-        stat_id = statistic_id(meter)
-        label, unit, unit_class = _FUELS[meter.fuel_type]
+        if costs:
+            self._add(
+                total_id,
+                total_last,
+                total_costs(costs, rates),
+                self._cost_metadata(total_id, f"LUS total cost {self.client.account_id}"),
+            )
 
-        last = await get_instance(self.hass).async_add_executor_job(
-            get_last_statistics, self.hass, 1, stat_id, True, {"sum"}
-        )
+    async def _async_import_meter(
+        self, meter: Meter, rates: Rates, total_last: LastStat
+    ) -> list[HourlyUsage] | None:
+        """Import consumption and, for billed meters, cost. Returns the cost hours."""
+        consumption_id = statistic_id(meter)
+        cost_fn = _COST_FUNCTIONS.get(meter.fuel_type)
+        cost_id = cost_statistic_id(meter) if cost_fn else None
+
+        consumption_last = await self._async_last(consumption_id)
         today = dt_util.now(SITE_TZ).date()
-        if last and last.get(stat_id):
-            row = last[stat_id][0]
-            last_start: datetime | None = dt_util.utc_from_timestamp(row["start"])
-            total = row["sum"] or 0.0
-            fetch_from = last_start.astimezone(SITE_TZ).date()
-        else:
-            last_start = None
-            total = 0.0
-            fetch_from = meter.first_read or (today - DEFAULT_BACKFILL)
-            _LOGGER.info("Backfilling %s from %s", stat_id, fetch_from)
+        resume = [self._resume_date(consumption_last, meter, today, None)]
+        if cost_id:
+            cost_last = await self._async_last(cost_id)
+            # Cost depends on usage earlier in the billing cycle, so re-read
+            # from the start of the cycle being resumed.
+            resume.append(self._resume_date(cost_last, meter, today, rates.billing_day))
+            resume.append(self._resume_date(total_last, meter, today, rates.billing_day))
+        fetch_from = min(resume)
 
         reads = []
         for start, end in _chunks(fetch_from, today, CHUNK_DAYS):
             reads.extend(await self.client.async_get_reads(meter, start, end))
+        hours = to_hourly(reads, meter.reads_per_hour)
 
+        label, unit, unit_class = _FUELS[meter.fuel_type]
+        self._add(
+            consumption_id,
+            consumption_last,
+            hours,
+            StatisticMetaData(
+                mean_type=StatisticMeanType.NONE,
+                has_sum=True,
+                name=f"LUS {label} {meter.utility_account_id}",
+                source=DOMAIN,
+                statistic_id=consumption_id,
+                unit_class=unit_class,
+                unit_of_measurement=unit,
+            ),
+        )
+        if not cost_id:
+            return None
+
+        costs = cost_fn(hours, rates)
+        self._add(
+            cost_id,
+            cost_last,
+            costs,
+            self._cost_metadata(cost_id, f"LUS {label} cost {meter.utility_account_id}"),
+        )
+        return costs
+
+    async def _async_last(self, stat_id: str) -> LastStat:
+        last = await get_instance(self.hass).async_add_executor_job(
+            get_last_statistics, self.hass, 1, stat_id, True, {"sum"}
+        )
+        if not last or not last.get(stat_id):
+            return None, 0.0
+        row = last[stat_id][0]
+        return dt_util.utc_from_timestamp(row["start"]), row["sum"] or 0.0
+
+    @staticmethod
+    def _resume_date(
+        last: LastStat, meter: Meter, today: date, billing_day: int | None
+    ) -> date:
+        """First day to fetch so everything after `last` can be computed."""
+        last_start, _ = last
+        if last_start is None:
+            return meter.first_read or (today - DEFAULT_BACKFILL)
+        if billing_day is not None:
+            return cycle_bounds(last_start, billing_day)[0].date()
+        return last_start.astimezone(SITE_TZ).date()
+
+    def _cost_metadata(self, stat_id: str, name: str) -> StatisticMetaData:
+        return StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name=name,
+            source=DOMAIN,
+            statistic_id=stat_id,
+            unit_class=None,
+            unit_of_measurement=self.hass.config.currency,
+        )
+
+    def _add(
+        self,
+        stat_id: str,
+        last: LastStat,
+        hours: list[HourlyUsage],
+        metadata: StatisticMetaData,
+    ) -> None:
+        """Append the hours after the last stored one, continuing its running sum."""
+        last_start, total = last
         statistics = []
-        for hour in to_hourly(reads, meter.reads_per_hour):
+        for hour in hours:
             if last_start is not None and hour.start <= last_start:
                 continue
             total += hour.value
-            statistics.append(
-                StatisticData(start=hour.start, state=hour.value, sum=total)
-            )
+            statistics.append(StatisticData(start=hour.start, state=hour.value, sum=total))
         if not statistics:
             _LOGGER.debug("No new complete hours for %s", stat_id)
             return
-
         _LOGGER.debug(
             "Adding %d hours to %s, through %s",
             len(statistics),
             stat_id,
             statistics[-1]["start"],
         )
-        async_add_external_statistics(
-            self.hass,
-            StatisticMetaData(
-                mean_type=StatisticMeanType.NONE,
-                has_sum=True,
-                name=f"LUS {label} {meter.utility_account_id}",
-                source=DOMAIN,
-                statistic_id=stat_id,
-                unit_class=unit_class,
-                unit_of_measurement=unit,
-            ),
-            statistics,
-        )
+        async_add_external_statistics(self.hass, metadata, statistics)
+
+
+def total_costs(costs: list[list[HourlyUsage]], rates: Rates) -> list[HourlyUsage]:
+    """Sum per-meter costs plus garbage, for hours every meter has reported."""
+    by_meter = [{h.start: h.value for h in meter_costs} for meter_costs in costs]
+    common = set(by_meter[0]).intersection(*by_meter[1:])
+    return [
+        HourlyUsage(hour, sum(m[hour] for m in by_meter) + garbage_cost(hour, rates))
+        for hour in sorted(common)
+    ]
 
 
 def _chunks(start: date, end: date, days: int) -> list[tuple[date, date]]:

@@ -27,5 +27,31 @@
       "reauth_successful": "Signed in again.",
       "wrong_account": "Those credentials belong to a different LUS account."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Bill rates",
+        "description": "Rates from your LUS bill, used to estimate cost. Changes apply to hours imported from now on; past hours keep the cost they were imported with.",
+        "data": {
+          "electric_energy_rate": "Electric energy charge ($/kWh)",
+          "electric_fuel_adjustment_rate": "Electric fuel adjustment ($/kWh)",
+          "electric_customer_charge": "Electric customer charge ($/month)",
+          "water_tier1_rate": "Water tier 1 ($/gal)",
+          "water_tier2_rate": "Water tier 2 ($/gal)",
+          "water_tier1_gallons": "Water tier 1 limit (gallons per billing cycle)",
+          "water_customer_charge": "Water customer charge ($/month)",
+          "water_state_fee": "State safe drinking water fee ($/month)",
+          "wastewater_rate": "Wastewater volume charge ($/gal)",
+          "wastewater_customer_charge": "Wastewater customer charge ($/month)",
+          "wastewater_summer_months": "Summer wastewater discount months (billing months, e.g. 5,6,7,8,9,10)",
+          "garbage_charge": "Garbage and environmental services ($/month)",
+          "billing_day": "Meter read day of the month (billing cycles start on this day)"
+        }
+      }
+    },
+    "error": {
+      "invalid_months": "Enter month numbers 1\u201312 separated by commas."
+    }
   }
 }

@@ -23,9 +23,48 @@ One statistic per meter with interval data on the account's primary LUS account:
 - An hour is imported only once all of its reads are in, so partial hours are
   never stored short. Hours with missing reads older than 48 hours are
   imported as they are.
-- Interval reads carry no cost. Set a price per kWh / gallon in the Energy
-  dashboard if you want cost tracking.
 - Wastewater is billed from the water meter, so its numbers usually match water.
+
+## Estimated cost
+
+The portal's interval reads carry no cost, so the integration estimates it
+from your bill's rates and adds three more statistics:
+
+| Statistic | What it includes |
+|---|---|
+| `lus:<id>_electricity_cost` | kWh × (energy + fuel adjustment) + electric customer charge |
+| `lus:<id>_water_cost` | Tiered water + wastewater volume (with the summer discount) + water, state and wastewater fixed charges |
+| `lus:<account>_total_cost` | Electricity + water costs + garbage, for hours both meters have reported |
+
+- Monthly fixed charges are spread evenly over the hours of each billing cycle.
+- Water tiers reset at the start of each billing cycle (midnight on the meter
+  read day, the 23rd by default).
+- In summer billing months, wastewater isn't charged on gallons above the
+  tier-1 limit, matching the bill's "Summer Discount" line.
+- Checked against the October 2026 bill: the model reproduces its $475.39 in
+  current charges to within a cent when usage is spread across the cycle.
+
+**Using it in the Energy dashboard:** on the LUS electricity entry choose
+"Use an entity tracking the total costs" and pick `LUS electricity cost …`; do
+the same for water with `LUS water cost …`. Don't add the wastewater meter as a
+water source, or every gallon counts twice. To see the whole estimated bill,
+add a Statistics graph card for `LUS total cost …` with the "change" stat and a
+monthly period.
+
+**Updating rates:** Settings → Devices & services → LUS → Configure. The
+defaults come from the October 2026 bill. The fuel adjustment changes most
+months; update it from each bill. New rates apply to hours imported after the
+change; hours already stored keep the cost they were imported with. The
+backfill uses the current rates for all of history, so older months are only
+approximate.
+
+**Not modeled:** taxes (currently $0 on the bill), late fees, payments and
+credits, and any change in the tier-1 limit between cycles. The tier-1 limit
+of 20,470 gallons is taken from the October bill; if LUS prorates it by cycle
+length, months with a different number of days will be slightly off. Which
+months get the summer wastewater discount is a guess (May–October) apart
+from October, which the bill confirms; adjust it in the options if a bill shows
+otherwise.
 
 ## Install
 

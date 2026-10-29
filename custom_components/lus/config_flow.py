@@ -9,17 +9,32 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlowWithReload,
+)
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .api import LusAuthError, LusClient, LusError
 from .const import DOMAIN
+from .cost import Rates
 
 _LOGGER = logging.getLogger(__name__)
 
+PASSWORD_SELECTOR = TextSelector(
+    TextSelectorConfig(type=TextSelectorType.PASSWORD, autocomplete="current-password")
+)
 USER_SCHEMA = vol.Schema(
-    {vol.Required(CONF_USERNAME): str, vol.Required(CONF_PASSWORD): str}
+    {vol.Required(CONF_USERNAME): str, vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR}
 )
 
 
@@ -27,6 +42,11 @@ class LusConfigFlow(ConfigFlow, domain=DOMAIN):
     """Collect portal credentials and check them."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> LusOptionsFlow:
+        return LusOptionsFlow()
 
     async def _async_validate(self, username: str, password: str) -> tuple[str | None, str | None]:
         """Return (account id, error key)."""
@@ -88,7 +108,51 @@ class LusConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_update_reload_and_abort(entry, data=data)
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema({vol.Required(CONF_PASSWORD): str}),
+            data_schema=vol.Schema({vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR}),
             description_placeholders={"username": entry.data[CONF_USERNAME]},
+            errors=errors,
+        )
+
+
+def _summer_months(value: str) -> str | None:
+    """Normalize a comma-separated month list, or None if it isn't one."""
+    months = [m for m in str(value).replace(" ", "").split(",") if m]
+    if not all(m.isdigit() and 1 <= int(m) <= 12 for m in months):
+        return None
+    return ",".join(str(int(m)) for m in months)
+
+
+class LusOptionsFlow(OptionsFlowWithReload):
+    """Edit the bill rates used to estimate cost."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            months = _summer_months(user_input["wastewater_summer_months"])
+            if months is None:
+                errors["wastewater_summer_months"] = "invalid_months"
+            else:
+                user_input["wastewater_summer_months"] = months
+                return self.async_create_entry(
+                    data=Rates.from_options(user_input).as_options()
+                )
+
+        current = Rates.from_options(self.config_entry.options).as_options()
+        schema = {}
+        for key, value in current.items():
+            if key == "billing_day":
+                validator = vol.All(vol.Coerce(int), vol.Range(min=1, max=28))
+            elif key == "wastewater_summer_months":
+                validator = str
+            else:
+                validator = vol.All(vol.Coerce(float), vol.Range(min=0))
+            schema[vol.Required(key, default=value)] = validator
+        return self.async_show_form(
+            step_id="init",
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema(schema), user_input
+            ),
             errors=errors,
         )
