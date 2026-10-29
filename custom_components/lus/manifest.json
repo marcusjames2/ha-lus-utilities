@@ -1,10 +1,11 @@
 {
   "domain": "lus",
   "name": "LUS (Lafayette Utilities System)",
-  "codeowners": [],
+  "codeowners": ["@markdunbartechneaux"],
   "config_flow": true,
   "dependencies": ["recorder"],
-  "documentation": "https://github.com/",
+  "documentation": "https://github.com/markdunbartechneaux/ha-lus-utilities",
+  "issue_tracker": "https://github.com/markdunbartechneaux/ha-lus-utilities/issues",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "requirements": [],
