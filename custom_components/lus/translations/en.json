@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "LUS customer portal",
+        "description": "Sign in with the username and password you use at dss-lus.opower.com.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in to LUS again",
+        "description": "The LUS portal rejected the saved password for {username}.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "The LUS portal rejected the username or password.",
+      "cannot_connect": "Could not reach the LUS portal.",
+      "no_meters": "This account has no meters with interval (smart meter) data."
+    },
+    "abort": {
+      "already_configured": "This LUS account is already set up.",
+      "reauth_successful": "Signed in again.",
+      "wrong_account": "Those credentials belong to a different LUS account."
+    }
+  }
+}

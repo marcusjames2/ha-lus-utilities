@@ -1,0 +1,12 @@
+{
+  "domain": "lus",
+  "name": "LUS (Lafayette Utilities System)",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": ["recorder"],
+  "documentation": "https://github.com/",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "version": "0.1.0"
+}
