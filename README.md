@@ -77,8 +77,13 @@ from your bill's rates and adds three more statistics:
 - To use your bill's tier-1 limit instead, enter it in the options. It then
   applies to later summers too, until a later set of rates changes it, so
   update it when LUS recalculates it or set it back to 0.
-- Water tiers reset at the start of each billing cycle (midnight on the meter
-  read day, the 23rd by default).
+- Billing cycles are each meter's own bill periods, read from the portal: a
+  period runs from midnight after one meter read to midnight after the next,
+  and LUS reads on a different day some months. Water tiers reset at the start
+  of each water period. The open cycle is taken to end a month after the last
+  bill; once the next bill shows its real end, that cycle's stored costs are
+  recalculated. A day set in the options instead makes every cycle start at
+  midnight on that day.
 - Checked against the October 2026 bill: with that bill's tier-1 limit of
   20,470 gallons, the model reproduces its $475.39 in current charges to
   within a cent when usage is spread across the cycle.
@@ -128,11 +133,16 @@ it worked out from the meter.
 update, so past hours the portal skipped get their fixed charges back and the
 total stops leaving out the other meter's charges for them.
 
+**Upgrading to 0.6.0:** sets of rates still holding the old default billing
+day (23) switch to 0, your bills' own dates, and every stored cost is
+recalculated once on the first update. A day you changed yourself is kept.
+
 **Not modeled:** taxes (currently $0 on the bill), late fees, payments and
 credits, and any adjustment LUS makes to a winter average for unusual
-weather. The worked-out winter average assumes each cycle runs from midnight
-on the meter read day; if LUS reads a few days early or late, enter the
-figure from your bill.
+weather. The worked-out winter average follows the water meter's own bill
+periods, but sums its hourly reads, which can run a few percent under the
+gallons billed; if it differs from the tier-1 figure on your bill, enter
+that figure instead.
 
 ## Install
 

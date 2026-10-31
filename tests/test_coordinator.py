@@ -7,7 +7,7 @@ import pytest
 
 from custom_components.lus import coordinator as coord
 from custom_components.lus.api import Meter, Read
-from custom_components.lus.cost import SITE_TZ, Rates
+from custom_components.lus.cost import SITE_TZ, Rates, RateSchedule
 
 CDT = timezone(timedelta(hours=-5))
 METER = Meter("elec-uuid", "1000000001", "ELECTRICITY", "QUARTER_HOUR", date(2026, 10, 25))
@@ -17,6 +17,12 @@ class FakeClient:
     def __init__(self, reads: list[Read]) -> None:
         self.reads = reads
         self.requests: list[tuple[date, date]] = []
+        self.periods: list[tuple[datetime, datetime]] = []
+        self.bill_requests = 0
+
+    async def async_get_bill_periods(self, meter):
+        self.bill_requests += 1
+        return self.periods
 
     async def async_get_reads(self, meter, start, end):
         self.requests.append((start, end))
@@ -55,6 +61,8 @@ def harness(monkeypatch):
         c.hass = SimpleNamespace(config=SimpleNamespace(currency="USD"))
         c.client = FakeClient(reads)
         c._winters = {}
+        c._bill_ends = {}
+        c.cycles = None
         return c
 
     return SimpleNamespace(make=make, added=added, last_stats=last_stats)
@@ -185,6 +193,11 @@ def water_imported_through(harness, last_hour: datetime) -> None:
     harness.last_stats["lus:1000000002_water_cost"] = last
 
 
+def winters(c) -> dict:
+    """The kept winter averages, by meter and winter."""
+    return {key[:2]: average for key, average in c._winters.items()}
+
+
 def winter_requests(c) -> list[tuple[date, date]]:
     return [r for r in c.client.requests if r[0] < date(2026, 9, 1)]
 
@@ -208,7 +221,7 @@ async def test_automatic_tier_limit_reads_last_winter_once(harness):
 
     assert winter_requests(c) == WINTER_REQUESTS  # the first time only
     limit = 30 * (720 + 744 + 744 + 671) / 4  # March's cycle loses an hour to DST
-    assert c._winters == {("water-uuid", 23, 2026): pytest.approx(limit)}
+    assert winters(c) == {("water-uuid", 2026): pytest.approx(limit)}
     # By 10/27 this cycle is past the limit / 0.75: tier 2, wastewater on 75%.
     _, cost = harness.added[1]
     hourly_fixed = (6.99 + 1.00 + 11.29) / (31 * 24)
@@ -269,7 +282,7 @@ async def test_a_winter_partly_before_the_first_read_averages_the_rest(harness):
         (date(2026, 1, 23), date(2026, 2, 21)),
         (date(2026, 2, 22), date(2026, 3, 22)),
     ]
-    assert c._winters == {("water-uuid", 23, 2026): pytest.approx(30 * (744 + 671) / 2)}
+    assert winters(c) == {("water-uuid", 2026): pytest.approx(30 * (744 + 671) / 2)}
 
 
 async def test_no_winter_reads_are_requested_before_the_first_read(harness):
@@ -281,4 +294,39 @@ async def test_no_winter_reads_are_requested_before_the_first_read(harness):
     await c._async_import_meter(meter, Rates(), (None, 0.0))
 
     assert all(start >= date(2026, 9, 23) for start, _ in c.client.requests)
-    assert c._winters == {("water-uuid", 23, 2026): None}
+    assert winters(c) == {("water-uuid", 2026): None}
+
+
+# Made-up bill periods on varying days.
+BILLS = [
+    (datetime(2026, 7, 22, tzinfo=SITE_TZ), datetime(2026, 8, 21, tzinfo=SITE_TZ)),
+    (datetime(2026, 8, 21, tzinfo=SITE_TZ), datetime(2026, 9, 23, tzinfo=SITE_TZ)),
+    (datetime(2026, 9, 23, tzinfo=SITE_TZ), datetime(2026, 10, 22, tzinfo=SITE_TZ)),
+]
+
+
+async def test_meter_cycles_follow_its_bills_and_recost_the_cycle_a_bill_closes(harness):
+    c = harness.make([])
+    c.client.periods = BILLS[:2]
+    schedule, end, redo = await c._async_meter_rates(METER, RateSchedule())
+    assert schedule.cycles.bounds(datetime(2026, 8, 25, tzinfo=SITE_TZ)) == BILLS[1]
+    # The first look since starting costs the newest bill's cycle again.
+    assert (end, redo) == (BILLS[1][1], BILLS[1][0])
+
+    c._bill_ends[METER.uuid] = end
+    _, _, redo = await c._async_meter_rates(METER, RateSchedule())
+    assert redo is None  # no new bill
+
+    c.client.periods = BILLS  # the next bill closes the cycle that was open
+    _, end, redo = await c._async_meter_rates(METER, RateSchedule())
+    assert (end, redo) == (BILLS[2][1], BILLS[2][0])
+
+
+async def test_a_day_in_the_options_skips_the_bill_dates(harness):
+    c = harness.make([])
+    c.client.periods = BILLS
+    schedule, end, redo = await c._async_meter_rates(
+        METER, RateSchedule([(None, Rates(billing_day=10))])
+    )
+    assert (end, redo, c.client.bill_requests) == (None, None, 0)
+    assert schedule.cycles.bounds(datetime(2026, 8, 25, tzinfo=SITE_TZ))[0].day == 10

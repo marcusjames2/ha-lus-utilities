@@ -153,6 +153,21 @@ class LusClient:
         )
         return parse_reads(body)
 
+    async def async_get_bill_periods(self, meter: Meter) -> list[tuple[datetime, datetime]]:
+        """Return the meter's billing periods, oldest first, as (start, end).
+
+        Without dates, the bill aggregation returns every bill on the account.
+        """
+        body = await self._get(
+            f"DataBrowser-v1/cws/utilities/{CLIENT_CODE}/utilityAccounts/{meter.uuid}/reads",
+            params={
+                "aggregateType": "bill",
+                "includeEnhancedBilling": "false",
+                "includeMultiRegisterData": "false",
+            },
+        )
+        return parse_bill_periods(body)
+
     async def _get(
         self,
         path: str,
@@ -242,6 +257,17 @@ def parse_reads(body: dict[str, Any]) -> list[Read]:
             )
         )
     return reads
+
+
+def parse_bill_periods(body: dict[str, Any]) -> list[tuple[datetime, datetime]]:
+    """Build billing periods from a bill-aggregated reads response."""
+    periods = []
+    for item in body.get("reads") or []:
+        if item.get("startTime") and item.get("endTime"):
+            periods.append(
+                (datetime.fromisoformat(item["startTime"]), datetime.fromisoformat(item["endTime"]))
+            )
+    return sorted(periods)
 
 
 def to_hourly(
