@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import json
 from typing import Any
 
@@ -251,10 +251,12 @@ def to_hourly(
 ) -> list[HourlyUsage]:
     """Sum reads into clock hours.
 
-    Within `settle` of the newest read, stops at the first incomplete hour so
-    a partially reported hour is picked up whole on a later update instead of
-    being imported short. Older incomplete hours are taken as they are, so a
-    permanent gap in the meter data can't stall imports.
+    Within `settle` of the newest read, stops at the first incomplete hour, or
+    at the first hour with no reads at all, so an hour still being reported is
+    picked up whole on a later update instead of being imported short or
+    skipped for good. Older incomplete hours are taken as they are and older
+    hours with no reads are left out, so a permanent gap in the meter data
+    can't stall imports.
     """
     reads = list(reads)
     if not reads:
@@ -269,7 +271,14 @@ def to_hourly(
     hours: list[HourlyUsage] = []
     for hour in sorted(buckets):
         group = buckets[hour]
-        if len(group) < reads_per_hour and hour >= cutoff:
+        if hour >= cutoff and len(group) < reads_per_hour:
+            break
+        if hours and next_hour(hours[-1].start) >= cutoff and hour > next_hour(hours[-1].start):
             break
         hours.append(HourlyUsage(start=hour, value=sum(r.value for r in group)))
     return hours
+
+
+def next_hour(hour: datetime) -> datetime:
+    """The start of the hour after `hour`, in real time across DST changes."""
+    return hour.astimezone(timezone.utc) + timedelta(hours=1)
