@@ -45,6 +45,10 @@ async def async_migrate_entry(hass: HomeAssistant, entry: LusConfigEntry) -> boo
         hass.config_entries.async_update_entry(
             entry, options=migrate_options_1_2(entry.options), minor_version=2
         )
+    if entry.minor_version < 3:
+        hass.config_entries.async_update_entry(
+            entry, options=migrate_options_1_3(entry.options), minor_version=3
+        )
     return True
 
 
@@ -67,3 +71,13 @@ def migrate_options_1_2(options: Mapping[str, Any]) -> dict[str, Any]:
         migrated["rate_schedule"] = [months(e) for e in migrated["rate_schedule"]]
     migrated[CONF_RECALCULATE_FROM] = RECALCULATE_ALL.isoformat()
     return migrated
+
+
+def migrate_options_1_3(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Options for 0.5.0, whose default water tier-1 limit is worked out from
+    the meter. Saved rates carry their own limit and are kept; without them
+    the limit was a fixed 20,470 gallons, so every stored cost is recomputed.
+    """
+    if "rate_schedule" in options or "water_tier1_gallons" in options:
+        return dict(options)
+    return {**options, CONF_RECALCULATE_FROM: RECALCULATE_ALL.isoformat()}

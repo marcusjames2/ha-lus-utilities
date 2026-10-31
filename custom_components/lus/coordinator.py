@@ -46,6 +46,7 @@ from .const import (
     DOMAIN,
     RECALCULATE_LOOKBACK,
     UPDATE_INTERVAL,
+    WINTER_SETTLE,
 )
 from .cost import (
     SITE_TZ,
@@ -57,6 +58,9 @@ from .cost import (
     electricity_costs,
     garbage_cost,
     water_costs,
+    winter_average,
+    winter_cycles,
+    winters_needed,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -125,6 +129,9 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
             entry.data[CONF_USERNAME],
             entry.data[CONF_PASSWORD],
         )
+        # (meter uuid, billing day, winter) -> average gallons per bill, or None
+        # if the meter has no reads for it; kept once the winter's data settles.
+        self._winters: dict[tuple[str, int, int], float | None] = {}
 
     async def _async_update_data(self) -> LusData | None:
         rates = RateSchedule.from_options(self.config_entry.options)
@@ -231,7 +238,14 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
         if not cost_id:
             return None
 
-        costs = cost_fn(hours, rates)
+        if meter.fuel_type == FUEL_WATER:
+            winters, hold_from = await self._async_winter_averages(meter, hours, rates, today)
+            costs = water_costs(hours, rates, winters)
+            if hold_from is not None:
+                # Store no cost that a winter still coming in could change.
+                costs = [c for c in costs if c.start < hold_from]
+        else:
+            costs = cost_fn(hours, rates)
         self._add(
             cost_id,
             cost_last,
@@ -239,6 +253,65 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
             self._cost_metadata(cost_id, f"LUS {label} cost {meter.utility_account_id}"),
         )
         return costs
+
+    async def _async_winter_averages(
+        self,
+        meter: Meter,
+        hours: list[HourlyUsage],
+        rates: Rates | RateSchedule,
+        today: date,
+    ) -> tuple[dict[int, float], datetime | None]:
+        """December-March averages for the summer bills in `hours` that take
+        their tier-1 limit from the meter, and the first hour whose cost has to
+        wait for a winter's reads to come in (None if none does)."""
+        billing_day = rates.billing_day
+        averages = {}
+        hold_from = None
+        for winter, first_hour in winters_needed(hours, rates).items():
+            key = (meter.uuid, billing_day, winter)
+            if key in self._winters:
+                average = self._winters[key]
+            else:
+                average, complete = await self._async_read_winter(
+                    meter, winter, billing_day, today
+                )
+                winter_end = winter_cycles(winter, billing_day)[-1][1]
+                if complete:
+                    # Anything less is read again on the next update.
+                    self._winters[key] = average
+                    _LOGGER.info(
+                        "Winter %s average for meter %s: %s gallons per bill",
+                        winter,
+                        meter.utility_account_id,
+                        "no data" if average is None else round(average),
+                    )
+                elif today - winter_end.date() <= WINTER_SETTLE:
+                    # The last winter bill's reads can lag a few days.
+                    hold_from = first_hour if hold_from is None else min(hold_from, first_hour)
+                    continue
+            if average is not None:
+                averages[winter] = average
+        return averages, hold_from
+
+    async def _async_read_winter(
+        self, meter: Meter, winter: int, billing_day: int, today: date
+    ) -> tuple[float | None, bool]:
+        """The winter's average from the portal, and whether the reads cover
+        every winter bill metered from the start of its cycle."""
+        cycles = [
+            (start, end)
+            for start, end in winter_cycles(winter, billing_day)
+            if meter.first_read is None or start.date() >= meter.first_read
+        ]
+        if not cycles:
+            return None, True
+        first = cycles[0][0].date()
+        last = min((cycles[-1][1] - timedelta(days=1)).date(), today)
+        reads = []
+        for chunk_start, chunk_end in _chunks(first, last, CHUNK_DAYS):
+            reads.extend(await self.client.async_get_reads(meter, chunk_start, chunk_end))
+        # A past window, so take every hour as it is.
+        return winter_average(to_hourly(reads, meter.reads_per_hour, settle=timedelta(0)), cycles)
 
     async def _async_last(self, stat_id: str, before: datetime | None = None) -> LastStat:
         """The last stored hour, or the last one before `before` when given.

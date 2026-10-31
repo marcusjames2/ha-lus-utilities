@@ -51,10 +51,23 @@ from your bill's rates and adds three more statistics:
   (the bill's "Summer Discount" line), but never on less than 75% of actual
   use. December–March bills charge every gallon at the tier-1 rate and all of
   it for wastewater.
+- The tier-1 limit is the household's average water use over the previous
+  December–March bills, which LUS recalculates each year. By default (a limit
+  of 0 in the options) the integration works it out from the water meter's
+  reads for those bills and logs it ("Winter 2026 average for meter …") so
+  you can compare it with your bill. A bill missing up to a day of reads is
+  scaled up to its whole cycle; one missing more is left out of the average.
+  Until the March bill's reads are all in (at most a week), the cost of later
+  hours waits for them. With no reads from that winter, summer bills have no
+  tiers and are charged wastewater on every gallon.
+- To use your bill's tier-1 limit instead, enter it in the options. It then
+  applies to later summers too, until a later set of rates changes it, so
+  update it when LUS recalculates it or set it back to 0.
 - Water tiers reset at the start of each billing cycle (midnight on the meter
   read day, the 23rd by default).
-- Checked against the October 2026 bill: the model reproduces its $475.39 in
-  current charges to within a cent when usage is spread across the cycle.
+- Checked against the October 2026 bill: with that bill's tier-1 limit of
+  20,470 gallons, the model reproduces its $475.39 in current charges to
+  within a cent when usage is spread across the cycle.
 
 **Using it in the Energy dashboard:** on the LUS electricity entry choose
 "Use an entity tracking the total costs" and pick `LUS electricity cost …`; do
@@ -93,13 +106,15 @@ history before your first bill entry is only approximate.
 **Upgrading from 0.4.0:** sets of rates still holding 0.4.0's guessed summer
 months (May–October) move to April–November, and every stored cost is
 recalculated on the first update under the corrected water and wastewater
-rules. Months you changed yourself are kept.
+rules. Months you changed yourself are kept. A tier-1 limit saved with your
+rates (20,470 gallons unless you changed it) is kept too; set it to 0 to have
+it worked out from the meter.
 
 **Not modeled:** taxes (currently $0 on the bill), late fees, payments and
-credits. The tier-1 limit is the household's average water use over the
-previous December–March bills, which LUS recalculates each year. The default
-of 20,470 gallons comes from one household's October 2026 bill, so enter the
-limit from your own bill, and add a new set of rates when it changes.
+credits, and any adjustment LUS makes to a winter average for unusual
+weather. The worked-out winter average assumes each cycle runs from midnight
+on the meter read day; if LUS reads a few days early or late, enter the
+figure from your bill.
 
 ## Install
 
