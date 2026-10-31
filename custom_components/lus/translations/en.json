@@ -60,5 +60,18 @@
     "error": {
       "invalid_months": "Enter month numbers 1–12 separated by commas."
     }
+  },
+  "entity": {
+    "sensor": {
+      "current_bill": {
+        "name": "Estimated bill this period"
+      },
+      "projected_bill": {
+        "name": "Projected bill this period"
+      },
+      "last_bill": {
+        "name": "Estimated last bill"
+      }
+    }
   }
 }

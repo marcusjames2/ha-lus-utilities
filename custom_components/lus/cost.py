@@ -210,3 +210,50 @@ def garbage_cost(hour: datetime, rates: Rates | RateSchedule) -> float:
     """The flat garbage charge spread evenly over the billing cycle."""
     schedule = _as_schedule(rates)
     return schedule.at(hour).garbage_charge / _Cycles(schedule.billing_day).hours(hour)
+
+
+@dataclass(frozen=True)
+class BillEstimate:
+    """Estimated charges for one billing cycle, from the hours imported so far."""
+
+    cycle_start: datetime
+    cycle_end: datetime
+    cost: float
+    # End of the newest hour counted; None when the cycle has no data yet.
+    data_through: datetime | None
+
+    @property
+    def complete(self) -> bool:
+        return self.data_through is not None and self.data_through >= self.cycle_end
+
+    @property
+    def projected(self) -> float | None:
+        """The cost so far scaled to the whole cycle, at the same hourly rate."""
+        if self.data_through is None:
+            return None
+        covered = (self.data_through - self.cycle_start) / timedelta(hours=1)
+        whole = (self.cycle_end - self.cycle_start) / timedelta(hours=1)
+        return self.cost * whole / covered if covered > 0 else None
+
+
+def bill_estimates(
+    total_hours: Iterable[HourlyUsage], billing_day: int, now: datetime
+) -> tuple[BillEstimate, BillEstimate]:
+    """The current cycle (the one containing `now`) and the one before it.
+
+    `total_hours` must cover both cycles from their start for the sums to be whole.
+    """
+    current_start, current_end = cycle_bounds(now, billing_day)
+    previous_start, _ = cycle_bounds(current_start - timedelta(seconds=1), billing_day)
+
+    hours = list(total_hours)
+
+    def estimate(start: datetime, end: datetime) -> BillEstimate:
+        inside = [h for h in hours if start <= h.start < end]
+        through = max(h.start for h in inside) + timedelta(hours=1) if inside else None
+        return BillEstimate(start, end, sum(h.value for h in inside), through)
+
+    return (
+        estimate(current_start, current_end),
+        estimate(previous_start, current_start),
+    )

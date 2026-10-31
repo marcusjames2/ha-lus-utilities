@@ -51,6 +51,19 @@ water source, or every gallon counts twice. To see the whole estimated bill,
 add a Statistics graph card for `LUS total cost …` with the "change" stat and a
 monthly period.
 
+**Bill sensors:** an **LUS** device with three sensors, which the Overview
+dashboard shows automatically (or add them to any dashboard):
+
+| Sensor | Value |
+|---|---|
+| Estimated bill this period | Estimated charges since the last meter read, through the newest data |
+| Projected bill this period | That amount scaled to the whole billing period at the same hourly rate |
+| Estimated last bill | The most recent closed billing period; compare it with your bill |
+
+Each has `period_start`, `period_end`, `data_through` and `complete`
+attributes. They include every charge the cost model covers, garbage included,
+and update with the statistics every 6 hours, so they trail by a day or two.
+
 **Updating rates:** Settings → Devices & services → LUS → Configure.
 1. Pick the date the rates take effect. It defaults to the start of the most
    recently closed billing cycle, which is the period on the bill you just

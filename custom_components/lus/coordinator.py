@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import logging
 
@@ -48,8 +49,10 @@ from .const import (
 )
 from .cost import (
     SITE_TZ,
+    BillEstimate,
     Rates,
     RateSchedule,
+    bill_estimates,
     cycle_bounds,
     electricity_costs,
     garbage_cost,
@@ -74,6 +77,15 @@ _COST_FUNCTIONS = {
 
 type LusConfigEntry = ConfigEntry[LusCoordinator]
 
+
+@dataclass(frozen=True)
+class LusData:
+    """Estimated bills for the sensors."""
+
+    account_id: str
+    current: BillEstimate
+    previous: BillEstimate
+
 # (start of the last stored hour, its running sum); (None, 0.0) if none stored.
 type LastStat = tuple[datetime | None, float]
 
@@ -95,7 +107,7 @@ def total_cost_statistic_id(account_id: str) -> str:
     return f"{DOMAIN}:{account_id}_total_cost"
 
 
-class LusCoordinator(DataUpdateCoordinator[None]):
+class LusCoordinator(DataUpdateCoordinator[LusData | None]):
     """Pulls new reads every few hours and appends them to statistics."""
 
     config_entry: LusConfigEntry
@@ -114,7 +126,7 @@ class LusCoordinator(DataUpdateCoordinator[None]):
             entry.data[CONF_PASSWORD],
         )
 
-    async def _async_update_data(self) -> None:
+    async def _async_update_data(self) -> LusData | None:
         rates = RateSchedule.from_options(self.config_entry.options)
         # After rates change, costs from this point on are recomputed and
         # overwrite what's stored; earlier hours are left as they are.
@@ -138,13 +150,19 @@ class LusCoordinator(DataUpdateCoordinator[None]):
         except (LusError, aiohttp.ClientError, TimeoutError) as err:
             raise UpdateFailed(str(err)) from err
 
+        data = None
         if costs:
+            totals = total_costs(costs, rates)
             self._add(
                 total_id,
                 total_last,
-                total_costs(costs, rates),
+                totals,
                 self._cost_metadata(total_id, f"LUS total cost {self.client.account_id}"),
             )
+            current, previous = bill_estimates(
+                totals, rates.billing_day, dt_util.now(SITE_TZ)
+            )
+            data = LusData(self.client.account_id, current, previous)
         if recalculate_from is not None:
             _LOGGER.info("Recalculated costs from %s", recalculate_from)
             options = {
@@ -153,6 +171,7 @@ class LusCoordinator(DataUpdateCoordinator[None]):
                 if k != CONF_RECALCULATE_FROM
             }
             self.hass.config_entries.async_update_entry(self.config_entry, options=options)
+        return data
 
     def _recalculate_from(self) -> datetime | None:
         value = self.config_entry.options.get(CONF_RECALCULATE_FROM)
@@ -181,7 +200,12 @@ class LusCoordinator(DataUpdateCoordinator[None]):
             # Cost depends on usage earlier in the billing cycle, so re-read
             # from the start of the cycle being resumed.
             resume.append(self._resume_date(cost_last, meter, today, rates.billing_day))
-            resume.append(self._resume_date(total_last, meter, today, rates.billing_day))
+            # The bill sensors need the previous cycle's total cost too.
+            resume.append(
+                self._resume_date(
+                    total_last, meter, today, rates.billing_day, previous_cycle=True
+                )
+            )
         fetch_from = min(resume)
 
         reads = []
@@ -244,15 +268,26 @@ class LusCoordinator(DataUpdateCoordinator[None]):
 
     @staticmethod
     def _resume_date(
-        last: LastStat, meter: Meter, today: date, billing_day: int | None
+        last: LastStat,
+        meter: Meter,
+        today: date,
+        billing_day: int | None,
+        previous_cycle: bool = False,
     ) -> date:
-        """First day to fetch so everything after `last` can be computed."""
+        """First day to fetch so everything after `last` can be computed.
+
+        With a billing day, that's the start of the cycle `last` is in, or of
+        the cycle before it when `previous_cycle` is set.
+        """
         last_start, _ = last
         if last_start is None:
             return meter.first_read or (today - DEFAULT_BACKFILL)
-        if billing_day is not None:
-            return cycle_bounds(last_start, billing_day)[0].date()
-        return last_start.astimezone(SITE_TZ).date()
+        if billing_day is None:
+            return last_start.astimezone(SITE_TZ).date()
+        start = cycle_bounds(last_start, billing_day)[0]
+        if previous_cycle:
+            start = cycle_bounds(start - timedelta(seconds=1), billing_day)[0]
+        return start.date()
 
     def _cost_metadata(self, stat_id: str, name: str) -> StatisticMetaData:
         return StatisticMetaData(
