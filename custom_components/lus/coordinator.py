@@ -16,6 +16,7 @@ from homeassistant.components.recorder.models import (
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, UnitOfEnergy, UnitOfVolume
@@ -37,8 +38,23 @@ from .api import (
     Meter,
     to_hourly,
 )
-from .const import CHUNK_DAYS, DEFAULT_BACKFILL, DOMAIN, UPDATE_INTERVAL
-from .cost import SITE_TZ, Rates, cycle_bounds, electricity_costs, garbage_cost, water_costs
+from .const import (
+    CHUNK_DAYS,
+    CONF_RECALCULATE_FROM,
+    DEFAULT_BACKFILL,
+    DOMAIN,
+    RECALCULATE_LOOKBACK,
+    UPDATE_INTERVAL,
+)
+from .cost import (
+    SITE_TZ,
+    Rates,
+    RateSchedule,
+    cycle_bounds,
+    electricity_costs,
+    garbage_cost,
+    water_costs,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -99,17 +115,22 @@ class LusCoordinator(DataUpdateCoordinator[None]):
         )
 
     async def _async_update_data(self) -> None:
-        rates = Rates.from_options(self.config_entry.options)
+        rates = RateSchedule.from_options(self.config_entry.options)
+        # After rates change, costs from this point on are recomputed and
+        # overwrite what's stored; earlier hours are left as they are.
+        recalculate_from = self._recalculate_from()
         try:
             await self.client.async_login()
             meters = [
                 m for m in await self.client.async_get_meters() if m.fuel_type in _FUELS
             ]
             total_id = total_cost_statistic_id(self.client.account_id)
-            total_last = await self._async_last(total_id)
+            total_last = await self._async_last(total_id, recalculate_from)
             costs = []
             for meter in meters:
-                meter_costs = await self._async_import_meter(meter, rates, total_last)
+                meter_costs = await self._async_import_meter(
+                    meter, rates, total_last, recalculate_from
+                )
                 if meter_costs is not None:
                     costs.append(meter_costs)
         except LusAuthError as err:
@@ -124,9 +145,28 @@ class LusCoordinator(DataUpdateCoordinator[None]):
                 total_costs(costs, rates),
                 self._cost_metadata(total_id, f"LUS total cost {self.client.account_id}"),
             )
+        if recalculate_from is not None:
+            _LOGGER.info("Recalculated costs from %s", recalculate_from)
+            options = {
+                k: v
+                for k, v in self.config_entry.options.items()
+                if k != CONF_RECALCULATE_FROM
+            }
+            self.hass.config_entries.async_update_entry(self.config_entry, options=options)
+
+    def _recalculate_from(self) -> datetime | None:
+        value = self.config_entry.options.get(CONF_RECALCULATE_FROM)
+        if not value:
+            return None
+        day = date.fromisoformat(value)
+        return datetime(day.year, day.month, day.day, tzinfo=SITE_TZ)
 
     async def _async_import_meter(
-        self, meter: Meter, rates: Rates, total_last: LastStat
+        self,
+        meter: Meter,
+        rates: Rates | RateSchedule,
+        total_last: LastStat,
+        recalculate_from: datetime | None = None,
     ) -> list[HourlyUsage] | None:
         """Import consumption and, for billed meters, cost. Returns the cost hours."""
         consumption_id = statistic_id(meter)
@@ -137,7 +177,7 @@ class LusCoordinator(DataUpdateCoordinator[None]):
         today = dt_util.now(SITE_TZ).date()
         resume = [self._resume_date(consumption_last, meter, today, None)]
         if cost_id:
-            cost_last = await self._async_last(cost_id)
+            cost_last = await self._async_last(cost_id, recalculate_from)
             # Cost depends on usage earlier in the billing cycle, so re-read
             # from the start of the cycle being resumed.
             resume.append(self._resume_date(cost_last, meter, today, rates.billing_day))
@@ -176,13 +216,30 @@ class LusCoordinator(DataUpdateCoordinator[None]):
         )
         return costs
 
-    async def _async_last(self, stat_id: str) -> LastStat:
-        last = await get_instance(self.hass).async_add_executor_job(
-            get_last_statistics, self.hass, 1, stat_id, True, {"sum"}
-        )
-        if not last or not last.get(stat_id):
+    async def _async_last(self, stat_id: str, before: datetime | None = None) -> LastStat:
+        """The last stored hour, or the last one before `before` when given.
+
+        With `before`, nothing found in the lookback window means everything is
+        recomputed from the start of history.
+        """
+        if before is None:
+            rows = await get_instance(self.hass).async_add_executor_job(
+                get_last_statistics, self.hass, 1, stat_id, True, {"sum"}
+            )
+        else:
+            rows = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                before - RECALCULATE_LOOKBACK,
+                before,
+                {stat_id},
+                "hour",
+                None,
+                {"sum"},
+            )
+        if not rows or not rows.get(stat_id):
             return None, 0.0
-        row = last[stat_id][0]
+        row = rows[stat_id][-1]
         return dt_util.utc_from_timestamp(row["start"]), row["sum"] or 0.0
 
     @staticmethod
@@ -235,7 +292,9 @@ class LusCoordinator(DataUpdateCoordinator[None]):
         async_add_external_statistics(self.hass, metadata, statistics)
 
 
-def total_costs(costs: list[list[HourlyUsage]], rates: Rates) -> list[HourlyUsage]:
+def total_costs(
+    costs: list[list[HourlyUsage]], rates: Rates | RateSchedule
+) -> list[HourlyUsage]:
     """Sum per-meter costs plus garbage, for hours every meter has reported."""
     by_meter = [{h.start: h.value for h in meter_costs} for meter_costs in costs]
     common = set(by_meter[0]).intersection(*by_meter[1:])

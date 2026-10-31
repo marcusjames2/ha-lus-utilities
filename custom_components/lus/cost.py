@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -52,6 +52,71 @@ class Rates:
         }
 
 
+class RateSchedule:
+    """Bill rates over time. Each set applies from its date until the next set's.
+
+    A set with no date applies from the beginning of history. Bills arrive after
+    their cycle closes, so a set is normally dated to the start of the cycle the
+    bill covers.
+    """
+
+    def __init__(self, periods: Iterable[tuple[date | None, Rates]] = ()) -> None:
+        periods = sorted(periods, key=lambda p: p[0] or date.min)
+        self._periods: list[tuple[date | None, Rates]] = periods or [(None, Rates())]
+        self._starts = [
+            datetime(d.year, d.month, d.day, tzinfo=SITE_TZ) if d else None
+            for d, _ in self._periods
+        ]
+
+    @classmethod
+    def from_options(cls, options: Mapping[str, Any]) -> RateSchedule:
+        entries = options.get("rate_schedule")
+        if entries is None:
+            # 0.2.x kept one set of rates directly in the options.
+            return cls([(None, Rates.from_options(options))])
+        return cls(
+            (
+                date.fromisoformat(e["effective_from"]) if e.get("effective_from") else None,
+                Rates.from_options(e),
+            )
+            for e in entries
+        )
+
+    def as_options(self) -> list[dict[str, Any]]:
+        return [
+            {"effective_from": d.isoformat() if d else None, **rates.as_options()}
+            for d, rates in self._periods
+        ]
+
+    def with_rates(self, effective_from: date, rates: Rates) -> RateSchedule:
+        """A copy with `rates` from `effective_from` until the next later set."""
+        kept = [(d, r) for d, r in self._periods if d != effective_from]
+        return RateSchedule([*kept, (effective_from, rates)])
+
+    @property
+    def periods(self) -> list[tuple[date | None, Rates]]:
+        return list(self._periods)
+
+    @property
+    def latest(self) -> Rates:
+        return self._periods[-1][1]
+
+    @property
+    def billing_day(self) -> int:
+        return self.latest.billing_day
+
+    def at(self, when: datetime) -> Rates:
+        """The rates in effect at `when`."""
+        for start, (_, rates) in zip(reversed(self._starts), reversed(self._periods)):
+            if start is None or start <= when:
+                return rates
+        return self._periods[0][1]
+
+
+def _as_schedule(rates: Rates | RateSchedule) -> RateSchedule:
+    return rates if isinstance(rates, RateSchedule) else RateSchedule([(None, rates)])
+
+
 def cycle_bounds(when: datetime, billing_day: int) -> tuple[datetime, datetime]:
     """Return the start and end of the billing cycle containing `when`."""
     local = when.astimezone(SITE_TZ)
@@ -88,54 +153,60 @@ class _Cycles:
         return (end - start) / timedelta(hours=1)
 
 
-def electricity_costs(hours: Iterable[HourlyUsage], rates: Rates) -> list[HourlyUsage]:
+def electricity_costs(
+    hours: Iterable[HourlyUsage], rates: Rates | RateSchedule
+) -> list[HourlyUsage]:
     """Cost per hour: kWh at the energy and fuel adjustment rates, plus the
     customer charge spread evenly over the billing cycle."""
-    cycles = _Cycles(rates.billing_day)
-    per_kwh = rates.electric_energy_rate + rates.electric_fuel_adjustment_rate
-    return [
-        HourlyUsage(
-            h.start,
-            h.value * per_kwh + rates.electric_customer_charge / cycles.hours(h.start),
+    schedule = _as_schedule(rates)
+    cycles = _Cycles(schedule.billing_day)
+    costs = []
+    for h in hours:
+        r = schedule.at(h.start)
+        per_kwh = r.electric_energy_rate + r.electric_fuel_adjustment_rate
+        costs.append(
+            HourlyUsage(
+                h.start,
+                h.value * per_kwh + r.electric_customer_charge / cycles.hours(h.start),
+            )
         )
-        for h in hours
-    ]
+    return costs
 
 
-def water_costs(hours: Iterable[HourlyUsage], rates: Rates) -> list[HourlyUsage]:
+def water_costs(
+    hours: Iterable[HourlyUsage], rates: Rates | RateSchedule
+) -> list[HourlyUsage]:
     """Cost per hour of water and wastewater, both billed from the water meter.
 
     Gallons count toward the tier-1 limit from the start of each billing cycle,
     so `hours` should begin at a cycle start for the tiers to come out right.
     """
-    cycles = _Cycles(rates.billing_day)
-    summer = rates.summer_months
-    fixed = (
-        rates.water_customer_charge
-        + rates.water_state_fee
-        + rates.wastewater_customer_charge
-    )
+    schedule = _as_schedule(rates)
+    cycles = _Cycles(schedule.billing_day)
     costs = []
     cycle_start = None
     used = 0.0
     for h in hours:
+        r = schedule.at(h.start)
         start, end = cycles.bounds(h.start)
         if start != cycle_start:
             cycle_start, used = start, 0.0
-        tier1 = max(0.0, min(h.value, rates.water_tier1_gallons - used))
+        tier1 = max(0.0, min(h.value, r.water_tier1_gallons - used))
         tier2 = h.value - tier1
         used += h.value
 
-        cost = tier1 * rates.water_tier1_rate + tier2 * rates.water_tier2_rate
+        cost = tier1 * r.water_tier1_rate + tier2 * r.water_tier2_rate
         # A cycle that ends at midnight on the 1st belongs to the prior month.
         billed_month = (end - timedelta(seconds=1)).month
-        sewer_gallons = tier1 if billed_month in summer else h.value
-        cost += sewer_gallons * rates.wastewater_rate
+        sewer_gallons = tier1 if billed_month in r.summer_months else h.value
+        cost += sewer_gallons * r.wastewater_rate
+        fixed = r.water_customer_charge + r.water_state_fee + r.wastewater_customer_charge
         cost += fixed / cycles.hours(h.start)
         costs.append(HourlyUsage(h.start, cost))
     return costs
 
 
-def garbage_cost(hour: datetime, rates: Rates) -> float:
+def garbage_cost(hour: datetime, rates: Rates | RateSchedule) -> float:
     """The flat garbage charge spread evenly over the billing cycle."""
-    return rates.garbage_charge / _Cycles(rates.billing_day).hours(hour)
+    schedule = _as_schedule(rates)
+    return schedule.at(hour).garbage_charge / _Cycles(schedule.billing_day).hours(hour)

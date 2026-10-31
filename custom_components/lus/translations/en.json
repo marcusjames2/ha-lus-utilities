@@ -31,8 +31,15 @@
   "options": {
     "step": {
       "init": {
-        "title": "Bill rates",
-        "description": "Rates from your LUS bill, used to estimate cost. Changes apply to hours imported from now on; past hours keep the cost they were imported with.",
+        "title": "Bill rates: effective date",
+        "description": "Pick the date these rates take effect, normally the start of the billing period on the bill (the prior meter read date). They apply from then until the next later set, and costs from that date on are recalculated on the next update.\n\nRates saved so far:\n{periods}",
+        "data": {
+          "effective_from": "Effective from"
+        }
+      },
+      "rates": {
+        "title": "Bill rates from {effective_from}",
+        "description": "Enter the rates from your LUS bill. The form starts with the rates already in effect on {effective_from}.",
         "data": {
           "electric_energy_rate": "Electric energy charge ($/kWh)",
           "electric_fuel_adjustment_rate": "Electric fuel adjustment ($/kWh)",
@@ -51,7 +58,7 @@
       }
     },
     "error": {
-      "invalid_months": "Enter month numbers 1\u201312 separated by commas."
+      "invalid_months": "Enter month numbers 1–12 separated by commas."
     }
   }
 }

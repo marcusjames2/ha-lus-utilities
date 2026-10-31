@@ -51,12 +51,19 @@ water source, or every gallon counts twice. To see the whole estimated bill,
 add a Statistics graph card for `LUS total cost …` with the "change" stat and a
 monthly period.
 
-**Updating rates:** Settings → Devices & services → LUS → Configure. The
-defaults come from the October 2026 bill. The fuel adjustment changes most
-months; update it from each bill. New rates apply to hours imported after the
-change; hours already stored keep the cost they were imported with. The
-backfill uses the current rates for all of history, so older months are only
-approximate.
+**Updating rates:** Settings → Devices & services → LUS → Configure.
+1. Pick the date the rates take effect. It defaults to the start of the most
+   recently closed billing cycle, which is the period on the bill you just
+   received.
+2. Enter the bill's rates. The form starts with the rates already in effect on
+   that date.
+
+Each set of rates applies from its date until the next later set, so you can
+also go back and correct an older period without touching later ones. On the
+next update, stored costs from that date on are recalculated and overwritten;
+usage isn't touched. Hours before the earliest dated set use the original,
+undated rates (the October 2026 bill unless you changed them), so backfilled
+history before your first bill entry is only approximate.
 
 **Not modeled:** taxes (currently $0 on the bill), late fees, payments and
 credits, and any change in the tier-1 limit between cycles. The tier-1 limit
