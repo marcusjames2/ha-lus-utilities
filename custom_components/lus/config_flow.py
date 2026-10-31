@@ -47,8 +47,9 @@ class LusConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
     # 2: summer months follow LUS schedules W1 and S1. 3: the water tier-1 limit
-    # defaults to the meter's winter average. See async_migrate_entry.
-    MINOR_VERSION = 3
+    # defaults to the meter's winter average. 4: costs cover hours a meter
+    # skipped. See async_migrate_entry.
+    MINOR_VERSION = 4
 
     @staticmethod
     @callback

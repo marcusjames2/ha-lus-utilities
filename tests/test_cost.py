@@ -1,6 +1,6 @@
 """Tests for the bill cost model."""
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -10,6 +10,7 @@ from custom_components.lus.cost import (
     Rates,
     cycle_bounds,
     electricity_costs,
+    fill_gaps,
     garbage_cost,
     water_costs,
     winter_average,
@@ -97,6 +98,39 @@ def test_total_only_covers_hours_every_meter_reported():
     total = total_costs([elec, water], RATES)
     assert len(total) == len(water)
     assert total[-1].start == water[-1].start
+
+
+def test_fill_gaps_adds_zero_use_hours_between_reported_ones():
+    hours = spread(720)[:10]
+    del hours[3:6]
+    filled = fill_gaps(hours)
+    assert [h.start for h in filled] == [h.start for h in spread(720)[:10]]
+    assert [h.value for h in filled[3:6]] == [0.0, 0.0, 0.0]
+    assert fill_gaps([]) == []
+
+
+def test_fill_gaps_counts_real_hours_across_dst():
+    # 11/1/2026: 1 a.m. happens twice; the reads skip from midnight to 3 a.m.
+    midnight = datetime(2026, 11, 1, 5, tzinfo=timezone.utc)
+    real = [HourlyUsage((midnight + timedelta(hours=i)).astimezone(SITE_TZ), 1.0) for i in range(5)]
+    assert [h.start for h in fill_gaps([real[0], real[-1]])] == [h.start for h in real]
+
+
+def test_a_skipped_water_hour_keeps_the_rest_of_the_total():
+    elec = electricity_costs(spread(2147), RATES)
+    water_hours = spread(21300)
+    del water_hours[100:135]  # 35 hours the portal skipped
+    water = water_costs(fill_gaps(water_hours), RATES)
+    total = total_costs([elec, water], RATES)
+
+    assert len(total) == len(elec)
+    assert sum(t.value for t in total) == pytest.approx(
+        sum(e.value for e in elec) + sum(w.value for w in water) + 38.04
+    )
+    # Water keeps all of its fixed charges and loses only the skipped use.
+    skipped = 35 * 21300 / 720
+    same_use = water_costs(spread(21300 - skipped), RATES)
+    assert sum(w.value for w in water) == pytest.approx(sum(w.value for w in same_use))
 
 
 def test_garbage_spreads_over_cycle():

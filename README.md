@@ -28,9 +28,13 @@ One statistic per meter with interval data on the account's primary LUS account:
   starts around September 2023), 30 days per request.
 - After that it checks every 6 hours. The portal lags about 1 day for electric
   and 1–2 days for water, so the newest data is always a day or two old.
-- An hour is imported only once all of its reads are in, so partial hours are
-  never stored short. Hours with missing reads older than 48 hours are
-  imported as they are.
+- An hour is imported only once all of its reads are in, and an hour with no
+  reads yet holds back the hours after it, so partial or late hours are never
+  stored short or skipped. After 48 hours, hours with missing reads are
+  imported as they are and hours with none are left out of usage.
+- The portal does skip hours now and then. A skipped hour still counts in the
+  cost statistics, with no usage: it carries its share of the fixed charges,
+  and the other meter's charges for it still count toward the total.
 - Wastewater is billed from the water meter, so its numbers usually match water.
 
 ## Estimated cost
@@ -42,7 +46,7 @@ from your bill's rates and adds three more statistics:
 |---|---|
 | `lus:<id>_electricity_cost` | kWh × (energy + fuel adjustment) + electric customer charge |
 | `lus:<id>_water_cost` | Tiered water + wastewater volume (with the summer discount) + water, state and wastewater fixed charges |
-| `lus:<account>_total_cost` | Electricity + water costs + garbage, for hours both meters have reported |
+| `lus:<account>_total_cost` | Electricity + water costs + garbage, through the newest hour both meters have reported |
 
 - Monthly fixed charges are spread evenly over the hours of each billing cycle.
 - Water and wastewater follow LUS rate schedules W1 and S1. In April–November
@@ -119,6 +123,10 @@ recalculated on the first update under the corrected water and wastewater
 rules. Months you changed yourself are kept. A tier-1 limit saved with your
 rates (20,470 gallons unless you changed it) is kept too; set it to 0 to have
 it worked out from the meter.
+
+**Upgrading to 0.5.1:** every stored cost is recalculated once on the first
+update, so past hours the portal skipped get their fixed charges back and the
+total stops leaving out the other meter's charges for them.
 
 **Not modeled:** taxes (currently $0 on the bill), late fees, payments and
 credits, and any adjustment LUS makes to a winter average for unusual
