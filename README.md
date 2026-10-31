@@ -45,10 +45,14 @@ from your bill's rates and adds three more statistics:
 | `lus:<account>_total_cost` | Electricity + water costs + garbage, for hours both meters have reported |
 
 - Monthly fixed charges are spread evenly over the hours of each billing cycle.
+- Water and wastewater follow LUS rate schedules W1 and S1. In April–November
+  bills, water above the tier-1 limit is charged at the tier-2 rate, and
+  wastewater is charged on the tier-1 limit or actual use, whichever is less
+  (the bill's "Summer Discount" line), but never on less than 75% of actual
+  use. December–March bills charge every gallon at the tier-1 rate and all of
+  it for wastewater.
 - Water tiers reset at the start of each billing cycle (midnight on the meter
   read day, the 23rd by default).
-- In summer billing months, wastewater isn't charged on gallons above the
-  tier-1 limit, matching the bill's "Summer Discount" line.
 - Checked against the October 2026 bill: the model reproduces its $475.39 in
   current charges to within a cent when usage is spread across the cycle.
 
@@ -87,12 +91,10 @@ undated rates (the October 2026 bill unless you changed them), so backfilled
 history before your first bill entry is only approximate.
 
 **Not modeled:** taxes (currently $0 on the bill), late fees, payments and
-credits, and any change in the tier-1 limit between cycles. The tier-1 limit
-of 20,470 gallons is taken from the October bill; if LUS prorates it by cycle
-length, months with a different number of days will be slightly off. Which
-months get the summer wastewater discount is a guess (May–October) apart
-from October, which the bill confirms; adjust it in the options if a bill shows
-otherwise.
+credits. The tier-1 limit is the household's average water use over the
+previous December–March bills, which LUS recalculates each year. The default
+of 20,470 gallons comes from one household's October 2026 bill, so enter the
+limit from your own bill, and add a new set of rates when it changes.
 
 ## Install
 

@@ -68,8 +68,10 @@ def test_costs_switch_rates_at_the_effective_date():
 
 
 def test_water_tier_limit_follows_the_schedule():
-    small_tier = Rates(water_tier1_gallons=10, wastewater_summer_months="")
-    schedule = RateSchedule([(None, Rates(wastewater_summer_months="")), (date(2026, 10, 23), small_tier)])
+    # November is a summer month, so water is tiered; no wastewater charge, so
+    # only the water tiers differ.
+    small_tier = Rates(water_tier1_gallons=10, wastewater_rate=0)
+    schedule = RateSchedule([(None, Rates()), (date(2026, 10, 23), small_tier)])
     hours = [HourlyUsage(local(2026, 10, 23, h), 10.0) for h in range(2)]
     first, second = water_costs(hours, schedule)
     # The second hour is all tier 2 under the new limit.
