@@ -19,6 +19,7 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.lus.api import Meter, Read
 from custom_components.lus.const import DOMAIN
+from custom_components.lus.cost import Rates
 
 CDT = timezone(timedelta(hours=-5))
 ACCOUNT = "5000000000"
@@ -115,3 +116,26 @@ async def test_setup_creates_bill_sensors_and_statistics(
         {"change"},
     )
     assert stats[f"{DOMAIN}:{ACCOUNT}_total_cost"]
+
+
+async def test_upgrade_from_040_moves_summer_months_and_recalculates(
+    recorder_mock: Recorder, hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    freezer.move_to("2026-10-31T14:00:00+00:00")
+    hass.config.currency = "USD"
+    saved = {"effective_from": None, **Rates(wastewater_summer_months="5,6,7,8,9,10").as_options()}
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=ACCOUNT, title=f"LUS account {ACCOUNT}",
+        data={"username": "user", "password": "pw"},
+        options={"rate_schedule": [saved]}, minor_version=1,
+    )
+    entry.add_to_hass(hass)
+    with patch("custom_components.lus.coordinator.LusClient", FakeClient):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.minor_version == 2
+    assert entry.options["rate_schedule"][0]["wastewater_summer_months"] == "4,5,6,7,8,9,10,11"
+    # The first update recomputed every stored cost and cleared the request.
+    assert "recalculate_from" not in entry.options

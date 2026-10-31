@@ -46,6 +46,8 @@ class LusConfigFlow(ConfigFlow, domain=DOMAIN):
     """Collect portal credentials and check them."""
 
     VERSION = 1
+    # 2: summer months follow LUS schedules W1 and S1 (see async_migrate_entry).
+    MINOR_VERSION = 2
 
     @staticmethod
     @callback

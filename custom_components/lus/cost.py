@@ -15,6 +15,10 @@ from .api import HourlyUsage
 
 SITE_TZ = ZoneInfo("America/Chicago")
 
+# Schedule S1: summer wastewater is never charged on less than this share of
+# the water actually used.
+WASTEWATER_MIN_SHARE = 0.75
+
 
 @dataclass(frozen=True)
 class Rates:
@@ -25,14 +29,18 @@ class Rates:
     electric_customer_charge: float = 13.00
     water_tier1_rate: float = 0.00209
     water_tier2_rate: float = 0.00331
+    # The household's average use over the previous December-March bills,
+    # which LUS recalculates each year.
     water_tier1_gallons: float = 20470
     water_customer_charge: float = 6.99
     water_state_fee: float = 1.00
     wastewater_rate: float = 0.00747
     wastewater_customer_charge: float = 11.29
-    # Billing months (by the month a cycle ends) where wastewater is not
-    # charged on water used above the tier-1 limit.
-    wastewater_summer_months: str = "5,6,7,8,9,10"
+    # Billing months (by the month a cycle ends) under the summer rules of LUS
+    # schedules W1 and S1: water above the tier-1 limit is charged at the
+    # tier-2 rate, and wastewater is capped at the tier-1 limit. Other months
+    # charge every gallon at the tier-1 rate and in full for wastewater.
+    wastewater_summer_months: str = "4,5,6,7,8,9,10,11"
     garbage_charge: float = 38.04
     # Day of the month the meters are read; billing cycles start at midnight on it.
     billing_day: int = 23
@@ -191,19 +199,30 @@ def water_costs(
         start, end = cycles.bounds(h.start)
         if start != cycle_start:
             cycle_start, used = start, 0.0
-        tier1 = max(0.0, min(h.value, r.water_tier1_gallons - used))
-        tier2 = h.value - tier1
-        used += h.value
+        before, used = used, used + h.value
 
-        cost = tier1 * r.water_tier1_rate + tier2 * r.water_tier2_rate
         # A cycle that ends at midnight on the 1st belongs to the prior month.
         billed_month = (end - timedelta(seconds=1)).month
-        sewer_gallons = tier1 if billed_month in r.summer_months else h.value
+        if billed_month in r.summer_months:
+            tier1 = max(0.0, min(h.value, r.water_tier1_gallons - before))
+            sewer_gallons = _summer_sewer_gallons(used, r) - _summer_sewer_gallons(before, r)
+        else:
+            tier1 = sewer_gallons = h.value
+        tier2 = h.value - tier1
+
+        cost = tier1 * r.water_tier1_rate + tier2 * r.water_tier2_rate
         cost += sewer_gallons * r.wastewater_rate
         fixed = r.water_customer_charge + r.water_state_fee + r.wastewater_customer_charge
         cost += fixed / cycles.hours(h.start)
         costs.append(HourlyUsage(h.start, cost))
     return costs
+
+
+def _summer_sewer_gallons(used: float, rates: Rates) -> float:
+    """Wastewater gallons charged for `used` gallons so far in a summer cycle:
+    the tier-1 limit or actual use, whichever is less, but never less than
+    WASTEWATER_MIN_SHARE of actual use."""
+    return max(min(used, rates.water_tier1_gallons), WASTEWATER_MIN_SHARE * used)
 
 
 def garbage_cost(hour: datetime, rates: Rates | RateSchedule) -> float:

@@ -46,12 +46,12 @@
           "electric_customer_charge": "Electric customer charge ($/month)",
           "water_tier1_rate": "Water tier 1 ($/gal)",
           "water_tier2_rate": "Water tier 2 ($/gal)",
-          "water_tier1_gallons": "Water tier 1 limit (gallons per billing cycle)",
+          "water_tier1_gallons": "Water tier 1 limit: your December–March average (gallons per billing cycle)",
           "water_customer_charge": "Water customer charge ($/month)",
           "water_state_fee": "State safe drinking water fee ($/month)",
           "wastewater_rate": "Wastewater volume charge ($/gal)",
           "wastewater_customer_charge": "Wastewater customer charge ($/month)",
-          "wastewater_summer_months": "Summer wastewater discount months (billing months, e.g. 5,6,7,8,9,10)",
+          "wastewater_summer_months": "Summer billing months: tiered water and wastewater discount (e.g. 4,5,6,7,8,9,10,11)",
           "garbage_charge": "Garbage and environmental services ($/month)",
           "billing_day": "Meter read day of the month (billing cycles start on this day)"
         }

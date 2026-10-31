@@ -48,17 +48,33 @@ def test_water_and_wastewater_match_october_bill():
     assert sum(c.value for c in costs) == pytest.approx(53.52 + 164.20, abs=0.01)
 
 
-def test_wastewater_discount_only_in_summer_months():
+def test_summer_rules_run_april_through_november():
+    # LUS schedules W1 and S1.
+    assert RATES.summer_months == {4, 5, 6, 7, 8, 9, 10, 11}
+
+
+def test_winter_months_have_no_tiers_and_no_discount():
     winter = Rates(wastewater_summer_months="6,7,8")
     costs = water_costs(spread(21300), winter)
-    # No discount: 830 gal more of wastewater.
-    assert sum(c.value for c in costs) == pytest.approx(53.52 + 164.20 + 6.20, abs=0.01)
+    # Every gallon at the tier-1 rate and every gallon of wastewater.
+    expected = 21300 * (0.00209 + 0.00747) + 6.99 + 1.00 + 11.29
+    assert sum(c.value for c in costs) == pytest.approx(expected, abs=0.01)
+
+
+def test_summer_wastewater_is_at_least_75_percent_of_use():
+    costs = water_costs(spread(40000), RATES)
+    expected = (
+        20470 * 0.00209 + (40000 - 20470) * 0.00331
+        + 0.75 * 40000 * 0.00747  # more than the 20,470 gal tier-1 limit
+        + 6.99 + 1.00 + 11.29
+    )
+    assert sum(c.value for c in costs) == pytest.approx(expected, abs=0.01)
 
 
 def test_water_tiers_reset_each_cycle():
     next_end = datetime(2026, 11, 23, tzinfo=SITE_TZ)
     hours = spread(21300) + spread(21300, CYCLE_END, next_end)
-    costs = water_costs(hours, Rates(wastewater_summer_months=""))
+    costs = water_costs(hours, RATES)
     first = sum(c.value for c in costs if c.start < CYCLE_END)
     second = sum(c.value for c in costs if c.start >= CYCLE_END)
     # Same usage, same tier split, same cost in both cycles.
