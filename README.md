@@ -90,6 +90,11 @@ usage isn't touched. Hours before the earliest dated set use the original,
 undated rates (the October 2026 bill unless you changed them), so backfilled
 history before your first bill entry is only approximate.
 
+**Upgrading from 0.4.0:** sets of rates still holding 0.4.0's guessed summer
+months (May–October) move to April–November, and every stored cost is
+recalculated on the first update under the corrected water and wastewater
+rules. Months you changed yourself are kept.
+
 **Not modeled:** taxes (currently $0 on the bill), late fees, payments and
 credits. The tier-1 limit is the household's average water use over the
 previous December–March bills, which LUS recalculates each year. The default

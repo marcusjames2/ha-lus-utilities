@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_components.lus import config_flow as flow_mod, coordinator as coord
+from custom_components.lus import config_flow as flow_mod, coordinator as coord, migrate_options_1_2
 from custom_components.lus.api import HourlyUsage, Meter, Read
 from custom_components.lus.cost import (
     SITE_TZ,
@@ -56,6 +56,23 @@ def test_flat_02x_options_become_one_undated_set():
 def test_schedule_round_trips_through_options():
     restored = RateSchedule.from_options({"rate_schedule": SCHEDULE.as_options()})
     assert restored.periods == SCHEDULE.periods
+
+
+def test_upgrade_moves_guessed_summer_months_and_recalculates_everything():
+    guessed = Rates(wastewater_summer_months="5,6,7,8,9,10")
+    chosen = Rates(wastewater_summer_months="6,7,8")
+    options = RateSchedule([(None, guessed), (date(2026, 9, 23), chosen)]).as_options()
+    migrated = migrate_options_1_2({"rate_schedule": options})
+
+    assert [e["wastewater_summer_months"] for e in migrated["rate_schedule"]] == [
+        "4,5,6,7,8,9,10,11",
+        "6,7,8",
+    ]
+    assert migrated["recalculate_from"] == "2000-01-01"
+    # 0.2.x's flat options, and options never saved.
+    flat = migrate_options_1_2({"wastewater_summer_months": "5,6,7,8,9,10"})
+    assert flat["wastewater_summer_months"] == "4,5,6,7,8,9,10,11"
+    assert migrate_options_1_2({}) == {"recalculate_from": "2000-01-01"}
 
 
 def test_costs_switch_rates_at_the_effective_date():

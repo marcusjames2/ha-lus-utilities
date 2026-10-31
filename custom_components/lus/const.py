@@ -1,6 +1,6 @@
 """Constants for the LUS integration."""
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 DOMAIN = "lus"
 
@@ -18,3 +18,6 @@ CONF_RECALCULATE_FROM = "recalculate_from"
 
 # How far before the recalculation date to look for the stored running sum.
 RECALCULATE_LOOKBACK = timedelta(days=31)
+
+# A recalculation date before any LUS smart-meter data: recomputes every stored cost.
+RECALCULATE_ALL = date(2000, 1, 1)
