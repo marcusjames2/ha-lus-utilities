@@ -1,15 +1,19 @@
 """Tests for the bill cost model."""
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from custom_components.lus.api import HourlyUsage
 from custom_components.lus.cost import (
     SITE_TZ,
+    BillingCycles,
     Rates,
+    RateSchedule,
+    bill_estimates,
     cycle_bounds,
     electricity_costs,
+    fill_gaps,
     garbage_cost,
     water_costs,
     winter_average,
@@ -97,6 +101,39 @@ def test_total_only_covers_hours_every_meter_reported():
     total = total_costs([elec, water], RATES)
     assert len(total) == len(water)
     assert total[-1].start == water[-1].start
+
+
+def test_fill_gaps_adds_zero_use_hours_between_reported_ones():
+    hours = spread(720)[:10]
+    del hours[3:6]
+    filled = fill_gaps(hours)
+    assert [h.start for h in filled] == [h.start for h in spread(720)[:10]]
+    assert [h.value for h in filled[3:6]] == [0.0, 0.0, 0.0]
+    assert fill_gaps([]) == []
+
+
+def test_fill_gaps_counts_real_hours_across_dst():
+    # 11/1/2026: 1 a.m. happens twice; the reads skip from midnight to 3 a.m.
+    midnight = datetime(2026, 11, 1, 5, tzinfo=timezone.utc)
+    real = [HourlyUsage((midnight + timedelta(hours=i)).astimezone(SITE_TZ), 1.0) for i in range(5)]
+    assert [h.start for h in fill_gaps([real[0], real[-1]])] == [h.start for h in real]
+
+
+def test_a_skipped_water_hour_keeps_the_rest_of_the_total():
+    elec = electricity_costs(spread(2147), RATES)
+    water_hours = spread(21300)
+    del water_hours[100:135]  # 35 hours the portal skipped
+    water = water_costs(fill_gaps(water_hours), RATES)
+    total = total_costs([elec, water], RATES)
+
+    assert len(total) == len(elec)
+    assert sum(t.value for t in total) == pytest.approx(
+        sum(e.value for e in elec) + sum(w.value for w in water) + 38.04
+    )
+    # Water keeps all of its fixed charges and loses only the skipped use.
+    skipped = 35 * 21300 / 720
+    same_use = water_costs(spread(21300 - skipped), RATES)
+    assert sum(w.value for w in water) == pytest.approx(sum(w.value for w in same_use))
 
 
 def test_garbage_spreads_over_cycle():
@@ -189,6 +226,79 @@ def test_april_and_november_bills_use_that_years_winter():
     # Read on the 1st: 4/1-5/1 is the April bill.
     first_of_month = spread(100, datetime(2027, 4, 1, tzinfo=SITE_TZ), datetime(2027, 5, 1, tzinfo=SITE_TZ))
     assert winters_needed(first_of_month, Rates(billing_day=1)) == {2027: first_of_month[0].start}
+
+
+def local(*args) -> datetime:
+    return datetime(*args, tzinfo=SITE_TZ)
+
+
+# Made-up bill periods: like LUS, they don't start on the same day every month.
+BILLS = [
+    (local(2026, 7, 22), local(2026, 8, 21)),
+    (local(2026, 8, 21), local(2026, 9, 23)),
+    (local(2026, 9, 23), local(2026, 10, 22)),
+]
+
+
+def test_bill_cycles_follow_the_bills():
+    cycles = BillingCycles(BILLS)
+    assert cycles.bounds(local(2026, 8, 25)) == BILLS[1]
+    assert cycles.bounds(local(2026, 9, 22, 23)) == BILLS[1]
+    assert cycles.bounds(local(2026, 9, 23)) == BILLS[2]
+    assert cycles.last_bill_end == local(2026, 10, 22)
+
+
+def test_bill_cycles_carry_on_monthly_beyond_the_bills():
+    cycles = BillingCycles(BILLS)
+    # The open cycle is taken to end a month after the last bill, on its day.
+    assert cycles.bounds(local(2026, 10, 30)) == (local(2026, 10, 22), local(2026, 11, 22))
+    assert cycles.bounds(local(2026, 12, 1)) == (local(2026, 11, 22), local(2026, 12, 22))
+    # Before the first bill, monthly on its day, ending where it starts.
+    assert cycles.bounds(local(2026, 7, 1)) == (local(2026, 6, 22), local(2026, 7, 22))
+
+
+def test_bill_cycles_without_bills_use_the_default_day():
+    assert BillingCycles().bounds(local(2026, 10, 1)) == (CYCLE_START, CYCLE_END)
+    assert BillingCycles().last_bill_end is None
+
+
+def test_a_day_in_the_options_wins_over_the_bills():
+    bills = BillingCycles(BILLS)
+    assert RateSchedule().with_bill_cycles(bills).cycles.bounds(local(2026, 8, 25)) == BILLS[1]
+    by_day = RateSchedule([(None, Rates(billing_day=10))]).with_bill_cycles(bills)
+    assert by_day.cycles.bounds(local(2026, 8, 25)) == (local(2026, 8, 10), local(2026, 9, 10))
+
+
+def test_water_tiers_reset_where_the_bill_does():
+    # 10 gal on each side of the 8/21 bill boundary, with a 10 gal limit.
+    hours = [HourlyUsage(local(2026, 8, 20, 22), 10.0), HourlyUsage(local(2026, 8, 21, 1), 10.0)]
+    usage_only = Rates(
+        water_tier1_gallons=10, wastewater_rate=0,
+        water_customer_charge=0, water_state_fee=0, wastewater_customer_charge=0,
+    )
+    schedule = RateSchedule([(None, usage_only)])
+    by_bill = water_costs(hours, schedule.with_bill_cycles(BillingCycles(BILLS)))
+    by_day = water_costs(hours, schedule)  # both hours in the 7/23-8/23 cycle
+    assert [c.value for c in by_bill] == pytest.approx([10 * 0.00209, 10 * 0.00209])
+    assert [c.value for c in by_day] == pytest.approx([10 * 0.00209, 10 * 0.00331])
+
+
+def test_bill_estimates_use_the_bill_dates():
+    hours = spread(100, local(2026, 9, 23), local(2026, 10, 22))
+    current, previous = bill_estimates(hours, BillingCycles(BILLS), local(2026, 10, 30))
+    assert (previous.cycle_start, previous.cycle_end) == BILLS[2]
+    assert (current.cycle_start, current.cycle_end) == (local(2026, 10, 22), local(2026, 11, 22))
+    assert previous.complete
+
+
+def test_winter_cycles_are_the_winter_bills_periods():
+    winter_bills = [
+        (local(2025, 11, 21), local(2025, 12, 22)),
+        (local(2025, 12, 22), local(2026, 1, 23)),
+        (local(2026, 1, 23), local(2026, 2, 20)),
+        (local(2026, 2, 20), local(2026, 3, 24)),
+    ]
+    assert winter_cycles(2026, BillingCycles(winter_bills)) == winter_bills
 
 
 def test_rates_round_trip_through_options():

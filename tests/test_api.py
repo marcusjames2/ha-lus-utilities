@@ -106,6 +106,27 @@ def test_to_hourly_accepts_old_incomplete_hours():
     assert hours[1].value == pytest.approx(0.75)
 
 
+def hourly_reads(start: datetime, count: int) -> list[Read]:
+    step = timedelta(hours=1)
+    return [Read(start + i * step, start + (i + 1) * step, 1.0) for i in range(count)]
+
+
+def test_to_hourly_waits_at_a_recent_hour_with_no_reads():
+    reads = hourly_reads(datetime(2026, 10, 26, tzinfo=CDT), 24)
+    del reads[20]  # 20:00 isn't in yet, though 21:00-23:00 are
+    hours = to_hourly(reads, reads_per_hour=1)
+    assert [h.start.hour for h in hours] == list(range(20))
+
+
+def test_to_hourly_leaves_out_an_old_hour_with_no_reads():
+    start = datetime(2026, 10, 20, tzinfo=CDT)
+    reads = hourly_reads(start, 24 * 5)
+    del reads[5]  # days ago
+    hours = to_hourly(reads, reads_per_hour=1)
+    assert len(hours) == 24 * 5 - 1
+    assert hours[5].start == start + timedelta(hours=6)
+
+
 def test_to_hourly_handles_dst_fall_back():
     # 2026-11-01 01:00 happens twice in Central time.
     first = quarter_reads(datetime(2026, 11, 1, 0, tzinfo=CDT), 8)
@@ -180,6 +201,39 @@ def login_responses(token: str = "tok-1") -> list:
         ("GET", PRIMARY, 200, {"id": "1000000099"}),
         ("GET", CURRENT, 200, {"uuid": "cust-uuid"}),
     ]
+
+
+async def test_bill_periods_come_from_the_bill_aggregation_without_dates():
+    body = {
+        "reads": [
+            {
+                "startTime": "2026-08-21T00:00:00.000-05:00",
+                "endTime": "2026-09-23T00:00:00.000-05:00",
+                "consumption": {"value": 3100.0, "type": "ACTUAL"},
+            },
+            {
+                "startTime": "2026-07-22T00:00:00.000-05:00",
+                "endTime": "2026-08-21T00:00:00.000-05:00",
+                "consumption": {"value": 2900.0, "type": "ESTIMATED"},
+            },
+            {"consumption": {"value": 1.0}},  # no dates: skipped
+        ]
+    }
+    session = FakeSession(
+        login_responses() + [("GET", META, 200, METADATA), ("GET", READS, 200, body)]
+    )
+    client = LusClient(session, "user", "pw")
+    await client.async_login()
+    meters = await client.async_get_meters()
+
+    periods = await client.async_get_bill_periods(meters[0])
+    assert periods == [
+        (datetime(2026, 7, 22, tzinfo=CDT), datetime(2026, 8, 21, tzinfo=CDT)),
+        (datetime(2026, 8, 21, tzinfo=CDT), datetime(2026, 9, 23, tzinfo=CDT)),
+    ]
+    (sent,) = session.sent(READS)
+    assert sent["params"]["aggregateType"] == "bill"
+    assert "startDate" not in sent["params"] and "endDate" not in sent["params"]
 
 
 async def test_login_and_reads_send_expected_headers():

@@ -19,7 +19,7 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.lus.api import Meter, Read
 from custom_components.lus.const import DOMAIN
-from custom_components.lus.cost import Rates
+from custom_components.lus.cost import SITE_TZ, Rates
 
 CDT = timezone(timedelta(hours=-5))
 ACCOUNT = "5000000000"
@@ -43,6 +43,16 @@ class FakeClient:
 
     async def async_get_meters(self):
         return METERS
+
+    async def async_get_bill_periods(self, meter):
+        # Bills read on the 23rd: each period starts at midnight on the 24th.
+        periods, start = [], date(meter.first_read.year, meter.first_read.month, 24)
+        while start < date(2026, 10, 24):
+            end = date(start.year + start.month // 12, start.month % 12 + 1, 24)
+            periods.append((datetime(start.year, start.month, 24, tzinfo=SITE_TZ),
+                            datetime(end.year, end.month, 24, tzinfo=SITE_TZ)))
+            start = end
+        return periods
 
     async def async_get_reads(self, meter, start, end):
         step = timedelta(minutes=15) if meter.reads_per_hour == 4 else timedelta(hours=1)
@@ -90,11 +100,11 @@ async def test_setup_creates_bill_sensors_and_statistics(
     last = hass.states.get(ids[f"{ACCOUNT}_last_bill"])
     assert current.attributes["unit_of_measurement"] == "USD"
     assert current.attributes["friendly_name"] == "LUS Estimated bill this period"
-    assert current.attributes["period_start"] == "2026-10-23"
-    assert last.attributes["period_start"] == "2026-09-23"
+    assert current.attributes["period_start"] == "2026-10-24"
+    assert last.attributes["period_start"] == "2026-09-24"
     assert last.attributes["complete"] is True
 
-    # Default rates, 9/23-10/23: electric 2 kWh/h and water 30 gal/h for 30 days.
+    # Default rates, 9/24-10/24 by the bills: electric 2 kWh/h and water 30 gal/h for 30 days.
     # The water tier-1 limit is the meter's December-March average: 30 gal for
     # each hour of those bills' cycles, March's losing one to DST.
     kwh, gallons = 2 * 24 * 30, 30 * 24 * 30
@@ -139,7 +149,7 @@ async def test_upgrade_from_040_moves_summer_months_and_recalculates(
         await hass.async_block_till_done()
 
     assert entry.state is ConfigEntryState.LOADED
-    assert entry.minor_version == 3
+    assert entry.minor_version == 5
     assert entry.options["rate_schedule"][0]["wastewater_summer_months"] == "4,5,6,7,8,9,10,11"
     # The first update recomputed every stored cost and cleared the request.
     assert "recalculate_from" not in entry.options
