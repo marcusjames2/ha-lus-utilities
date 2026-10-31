@@ -55,7 +55,17 @@ from your bill's rates and adds three more statistics:
   December–March bills, which LUS recalculates each year. By default (a limit
   of 0 in the options) the integration works it out from the water meter's
   reads for those bills and logs it ("Winter 2026 average for meter …") so
-  you can compare it with your bill. A bill missing up to a day of reads is
+  you can compare it with your bill. Home Assistant hides info-level logs
+  by default; to see the line, add this to `configuration.yaml` and restart:
+
+  ```yaml
+  logger:
+    default: warning
+    logs:
+      custom_components.lus: info
+  ```
+
+  A bill missing up to a day of reads is
   scaled up to its whole cycle; one missing more is left out of the average.
   Until the March bill's reads are all in (at most a week), the cost of later
   hours waits for them. With no reads from that winter, summer bills have no
