@@ -7,7 +7,7 @@ import pytest
 
 from custom_components.lus import coordinator as coord
 from custom_components.lus.api import Meter, Read
-from custom_components.lus.cost import Rates
+from custom_components.lus.cost import SITE_TZ, Rates
 
 CDT = timezone(timedelta(hours=-5))
 METER = Meter("elec-uuid", "1000000001", "ELECTRICITY", "QUARTER_HOUR", date(2026, 10, 25))
@@ -54,6 +54,7 @@ def harness(monkeypatch):
         c = object.__new__(coord.LusCoordinator)
         c.hass = SimpleNamespace(config=SimpleNamespace(currency="USD"))
         c.client = FakeClient(reads)
+        c._winters = {}
         return c
 
     return SimpleNamespace(make=make, added=added, last_stats=last_stats)
@@ -136,3 +137,131 @@ async def test_wastewater_gets_usage_but_no_cost(harness):
     assert [meta["statistic_id"] for meta, _ in harness.added] == [
         "lus:1000000002_wastewater_consumption"
     ]
+
+
+def hourly_reads(start: datetime, end: datetime, value: float) -> list[Read]:
+    """A read for every real hour from start to end, across DST changes."""
+    reads = []
+    t = start.astimezone(timezone.utc)
+    while t < end:
+        reads.append(
+            Read(t.astimezone(SITE_TZ), (t + timedelta(hours=1)).astimezone(SITE_TZ), value)
+        )
+        t += timedelta(hours=1)
+    return reads
+
+
+WATER = Meter("water-uuid", "1000000002", "WATER", "HOUR", date(2025, 9, 23))
+
+# The December-March bills' cycles, 11/23-3/23, in 30-day requests.
+WINTER_REQUESTS = [
+    (date(2025, 11, 23), date(2025, 12, 22)),
+    (date(2025, 12, 23), date(2026, 1, 21)),
+    (date(2026, 1, 22), date(2026, 2, 20)),
+    (date(2026, 2, 21), date(2026, 3, 22)),
+]
+
+
+def water_imported_through(harness, last_hour: datetime) -> None:
+    last = [{"start": last_hour.timestamp(), "sum": 0.0}]
+    harness.last_stats["lus:1000000002_water_consumption"] = last
+    harness.last_stats["lus:1000000002_water_cost"] = last
+
+
+def winter_requests(c) -> list[tuple[date, date]]:
+    return [r for r in c.client.requests if r[0] < date(2026, 9, 1)]
+
+
+def without_march_18_to_20(reads: list[Read]) -> list[Read]:
+    return [r for r in reads if not date(2026, 3, 18) <= r.start.date() <= date(2026, 3, 20)]
+
+
+async def test_automatic_tier_limit_reads_last_winter_once(harness):
+    # 30 gal an hour last winter, 400 this fall.
+    reads = hourly_reads(
+        datetime(2025, 11, 23, tzinfo=SITE_TZ), datetime(2026, 3, 23, tzinfo=SITE_TZ), 30.0
+    ) + hourly_reads(
+        datetime(2026, 9, 23, tzinfo=SITE_TZ), datetime(2026, 10, 27, 12, tzinfo=SITE_TZ), 400.0
+    )
+    last_hour = datetime(2026, 10, 26, 23, tzinfo=CDT)
+    water_imported_through(harness, last_hour)
+    c = harness.make(reads)
+    await c._async_import_meter(WATER, Rates(), (last_hour, 0.0))
+    await c._async_import_meter(WATER, Rates(), (last_hour, 0.0))
+
+    assert winter_requests(c) == WINTER_REQUESTS  # the first time only
+    limit = 30 * (720 + 744 + 744 + 671) / 4  # March's cycle loses an hour to DST
+    assert c._winters == {("water-uuid", 23, 2026): pytest.approx(limit)}
+    # By 10/27 this cycle is past the limit / 0.75: tier 2, wastewater on 75%.
+    _, cost = harness.added[1]
+    hourly_fixed = (6.99 + 1.00 + 11.29) / (31 * 24)
+    assert cost[0]["state"] == pytest.approx(400 * 0.00331 + 0.75 * 400 * 0.00747 + hourly_fixed)
+
+
+async def test_costs_wait_while_last_winters_reads_come_in(harness, monkeypatch):
+    # 3/26: March's bill is missing 3/18-3/20, which may still arrive.
+    monkeypatch.setattr(
+        coord.dt_util, "now", lambda tz=None: datetime(2026, 3, 26, 12, tzinfo=SITE_TZ)
+    )
+    reads = without_march_18_to_20(
+        hourly_reads(datetime(2025, 11, 23, tzinfo=SITE_TZ), datetime(2026, 3, 26, tzinfo=SITE_TZ), 30.0)
+    )
+    last_hour = datetime(2026, 3, 17, 23, tzinfo=SITE_TZ)
+    water_imported_through(harness, last_hour)
+    c = harness.make(reads)
+    await c._async_import_meter(WATER, Rates(), (last_hour, 0.0))
+
+    april_bill = datetime(2026, 3, 23, tzinfo=SITE_TZ)
+    (_, usage), (_, cost) = harness.added
+    assert usage[-1]["start"] > april_bill
+    assert cost[-1]["start"] < april_bill
+    assert c._winters == {}
+
+
+async def test_an_incomplete_winter_is_used_but_read_again(harness):
+    # March's bill never gets 3/18-3/20.
+    reads = without_march_18_to_20(
+        hourly_reads(datetime(2025, 11, 23, tzinfo=SITE_TZ), datetime(2026, 3, 23, tzinfo=SITE_TZ), 30.0)
+    ) + hourly_reads(
+        datetime(2026, 9, 23, tzinfo=SITE_TZ), datetime(2026, 10, 27, 12, tzinfo=SITE_TZ), 30.0
+    )
+    last_hour = datetime(2026, 10, 26, 23, tzinfo=CDT)
+    water_imported_through(harness, last_hour)
+    c = harness.make(reads)
+    await c._async_import_meter(WATER, Rates(), (last_hour, 0.0))
+    await c._async_import_meter(WATER, Rates(), (last_hour, 0.0))
+
+    assert winter_requests(c) == WINTER_REQUESTS * 2
+    assert c._winters == {}
+
+
+async def test_a_winter_partly_before_the_first_read_averages_the_rest(harness):
+    meter = Meter("water-uuid", "1000000002", "WATER", "HOUR", date(2026, 1, 5))
+    reads = hourly_reads(
+        datetime(2026, 1, 5, tzinfo=SITE_TZ), datetime(2026, 3, 23, tzinfo=SITE_TZ), 30.0
+    ) + hourly_reads(
+        datetime(2026, 9, 23, tzinfo=SITE_TZ), datetime(2026, 10, 27, 12, tzinfo=SITE_TZ), 30.0
+    )
+    last_hour = datetime(2026, 10, 26, 23, tzinfo=CDT)
+    water_imported_through(harness, last_hour)
+    c = harness.make(reads)
+    await c._async_import_meter(meter, Rates(), (last_hour, 0.0))
+
+    # Only February's and March's bills were metered from the start of their cycles.
+    assert winter_requests(c) == [
+        (date(2026, 1, 23), date(2026, 2, 21)),
+        (date(2026, 2, 22), date(2026, 3, 22)),
+    ]
+    assert c._winters == {("water-uuid", 23, 2026): pytest.approx(30 * (744 + 671) / 2)}
+
+
+async def test_no_winter_reads_are_requested_before_the_first_read(harness):
+    meter = Meter("water-uuid", "1000000002", "WATER", "HOUR", date(2026, 9, 23))
+    reads = hourly_reads(
+        datetime(2026, 9, 23, tzinfo=SITE_TZ), datetime(2026, 10, 27, 12, tzinfo=SITE_TZ), 30.0
+    )
+    c = harness.make(reads)
+    await c._async_import_meter(meter, Rates(), (None, 0.0))
+
+    assert all(start >= date(2026, 9, 23) for start, _ in c.client.requests)
+    assert c._winters == {("water-uuid", 23, 2026): None}

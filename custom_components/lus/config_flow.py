@@ -46,8 +46,9 @@ class LusConfigFlow(ConfigFlow, domain=DOMAIN):
     """Collect portal credentials and check them."""
 
     VERSION = 1
-    # 2: summer months follow LUS schedules W1 and S1 (see async_migrate_entry).
-    MINOR_VERSION = 2
+    # 2: summer months follow LUS schedules W1 and S1. 3: the water tier-1 limit
+    # defaults to the meter's winter average. See async_migrate_entry.
+    MINOR_VERSION = 3
 
     @staticmethod
     @callback

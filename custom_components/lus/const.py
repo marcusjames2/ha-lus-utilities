@@ -21,3 +21,7 @@ RECALCULATE_LOOKBACK = timedelta(days=31)
 
 # A recalculation date before any LUS smart-meter data: recomputes every stored cost.
 RECALCULATE_ALL = date(2000, 1, 1)
+
+# How long after a winter's last bill to wait for reads covering every winter
+# bill before settling for the bills that are covered.
+WINTER_SETTLE = timedelta(days=7)

@@ -1,6 +1,6 @@
 """Tests for the bill cost model."""
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -12,10 +12,13 @@ from custom_components.lus.cost import (
     electricity_costs,
     garbage_cost,
     water_costs,
+    winter_average,
+    winter_cycles,
+    winters_needed,
 )
 from custom_components.lus.coordinator import total_costs
 
-RATES = Rates()
+RATES = Rates(water_tier1_gallons=20470)  # the October bill's tier-1 limit
 
 # The October 2026 bill's cycle: read 09/23, read 10/23.
 CYCLE_START = datetime(2026, 9, 23, tzinfo=SITE_TZ)
@@ -99,6 +102,93 @@ def test_total_only_covers_hours_every_meter_reported():
 def test_garbage_spreads_over_cycle():
     hours = spread(0)
     assert sum(garbage_cost(h.start, RATES) for h in hours) == pytest.approx(38.04)
+
+
+def winter(*gallons: float) -> list[HourlyUsage]:
+    """The December-March bills of winter 2025-26, each using its gallons evenly."""
+    return [h for (s, e), g in zip(WINTER, gallons) for h in spread(g, s, e)]
+
+
+WINTER = winter_cycles(2026, 23)
+APRIL_2027 = (datetime(2027, 3, 23, tzinfo=SITE_TZ), datetime(2027, 4, 23, tzinfo=SITE_TZ))
+
+
+def test_winter_cycles():
+    assert [(s.date(), e.date()) for s, e in WINTER] == [
+        (date(2025, 11, 23), date(2025, 12, 23)),
+        (date(2025, 12, 23), date(2026, 1, 23)),
+        (date(2026, 1, 23), date(2026, 2, 23)),
+        (date(2026, 2, 23), date(2026, 3, 23)),
+    ]
+    # With reads on the 1st, a cycle ending on the 1st is the prior month's bill.
+    first_of_month = winter_cycles(2026, 1)
+    assert first_of_month[0][0].date() == date(2025, 12, 1)
+    assert first_of_month[-1][1].date() == date(2026, 4, 1)
+
+
+def test_winter_average_is_the_mean_of_december_through_march_bills():
+    average, complete = winter_average(winter(20000, 22000, 18000, 24000), WINTER)
+    assert (average, complete) == (pytest.approx(21000), True)
+
+
+def test_winter_average_scales_up_a_bill_missing_a_few_hours():
+    hours = winter(20000, 22000, 18000, 24000)
+    del hours[800:812]  # 12 hours from the middle of January's
+    average, complete = winter_average(hours, WINTER)
+    assert (average, complete) == (pytest.approx(21000), True)
+
+
+def test_winter_average_skips_a_bill_missing_more_than_a_day():
+    hours = winter(20000, 22000, 18000, 24000)
+    del hours[800:800 + 10 * 24]  # 10 days from the middle of January's
+    average, complete = winter_average(hours, WINTER)
+    assert (average, complete) == (pytest.approx((20000 + 18000 + 24000) / 3), False)
+
+
+def test_winter_average_skips_a_bill_whose_last_reads_are_not_in():
+    hours = winter(20000, 22000, 18000, 24000)[:-2 * 24]
+    average, complete = winter_average(hours, WINTER)
+    assert (average, complete) == (pytest.approx((20000 + 22000 + 18000) / 3), False)
+    assert winter_average([], WINTER) == (None, False)
+
+
+def test_automatic_tier_limit_is_the_previous_winters_average():
+    costs = water_costs(spread(21300), Rates(), {2026: 20470})
+    assert sum(c.value for c in costs) == pytest.approx(53.52 + 164.20, abs=0.01)
+    april = water_costs(spread(21300, *APRIL_2027), Rates(), {2027: 20470})
+    assert sum(c.value for c in april) == pytest.approx(53.52 + 164.20, abs=0.01)
+
+
+def test_automatic_tier_limit_without_winter_data_has_no_tiers():
+    costs = water_costs(spread(21300), Rates())
+    # Every gallon at the tier-1 rate and every gallon of wastewater.
+    expected = 21300 * (0.00209 + 0.00747) + 6.99 + 1.00 + 11.29
+    assert sum(c.value for c in costs) == pytest.approx(expected, abs=0.01)
+
+
+def test_a_limit_from_the_bill_wins_over_the_winter_average():
+    costs = water_costs(spread(21300), RATES, {2026: 5000})
+    assert sum(c.value for c in costs) == pytest.approx(53.52 + 164.20, abs=0.01)
+
+
+def test_winters_needed_only_for_summer_bills_with_an_automatic_limit():
+    october = spread(100)
+    january = spread(100, datetime(2026, 12, 23, tzinfo=SITE_TZ), datetime(2027, 1, 23, tzinfo=SITE_TZ))
+    assert winters_needed(october, Rates()) == {2026: CYCLE_START}
+    assert winters_needed(october, RATES) == {}
+    assert winters_needed(january, Rates()) == {}
+    # A winter bill counted as summer has no finished winter to go by.
+    assert winters_needed(january, Rates(wastewater_summer_months="1")) == {}
+
+
+def test_april_and_november_bills_use_that_years_winter():
+    april = spread(100, *APRIL_2027)
+    november = spread(100, CYCLE_END, datetime(2026, 11, 23, tzinfo=SITE_TZ))
+    assert winters_needed(april, Rates()) == {2027: APRIL_2027[0]}
+    assert winters_needed(november, Rates()) == {2026: CYCLE_END}
+    # Read on the 1st: 4/1-5/1 is the April bill.
+    first_of_month = spread(100, datetime(2027, 4, 1, tzinfo=SITE_TZ), datetime(2027, 5, 1, tzinfo=SITE_TZ))
+    assert winters_needed(first_of_month, Rates(billing_day=1)) == {2027: first_of_month[0].start}
 
 
 def test_rates_round_trip_through_options():

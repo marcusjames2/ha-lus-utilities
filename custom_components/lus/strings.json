@@ -46,7 +46,7 @@
           "electric_customer_charge": "Electric customer charge ($/month)",
           "water_tier1_rate": "Water tier 1 ($/gal)",
           "water_tier2_rate": "Water tier 2 ($/gal)",
-          "water_tier1_gallons": "Water tier 1 limit: your December–March average (gallons per billing cycle)",
+          "water_tier1_gallons": "Water tier 1 limit: your December–March average in gallons (0 = work it out from the meter)",
           "water_customer_charge": "Water customer charge ($/month)",
           "water_state_fee": "State safe drinking water fee ($/month)",
           "wastewater_rate": "Wastewater volume charge ($/gal)",
