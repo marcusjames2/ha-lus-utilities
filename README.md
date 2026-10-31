@@ -6,6 +6,14 @@ into Home Assistant long-term statistics, for use in the Energy dashboard.
 The built-in Opower integration doesn't list LUS: LUS runs Opower's DSS portal,
 which has its own login and API path. This integration talks to it directly.
 
+> **Disclaimer:** This is an unofficial, independent project. It is not
+> affiliated with, endorsed by, or supported by Lafayette Utilities System
+> (LUS), the Lafayette Utilities Authority, or Opower/Oracle. The LUS name and
+> logo belong to their owner and are used only to identify the utility. Cost
+> figures are estimates; your LUS bill is the authoritative amount. The
+> integration reads the same customer portal you sign in to, so changes to that
+> portal may break it.
+
 ## What it imports
 
 One statistic per meter with interval data on the account's primary LUS account:
