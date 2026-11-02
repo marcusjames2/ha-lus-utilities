@@ -53,7 +53,7 @@
           "wastewater_customer_charge": "Wastewater customer charge ($/month)",
           "wastewater_summer_months": "Summer billing months: tiered water and wastewater discount (e.g. 4,5,6,7,8,9,10,11)",
           "garbage_charge": "Garbage and environmental services ($/month)",
-          "billing_day": "Meter read day of the month (billing cycles start on this day)"
+          "billing_day": "Day of the month billing cycles start (0 = your bills' own dates, from the portal)"
         }
       }
     },

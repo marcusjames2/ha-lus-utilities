@@ -5,14 +5,16 @@ Kept free of Home Assistant imports so it can be tested on its own.
 
 from __future__ import annotations
 
+import calendar
+from bisect import bisect_right
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, fields
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import math
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .api import HourlyUsage
+from .api import HourlyUsage, next_hour, validate_bill_periods
 
 SITE_TZ = ZoneInfo("America/Chicago")
 
@@ -26,6 +28,10 @@ WINTER_MONTHS = frozenset({12, 1, 2, 3})
 # A winter bill still counts toward the average with up to this much of its
 # cycle missing from the interval reads; its use is scaled up to the whole cycle.
 WINTER_COVERAGE_SLACK = timedelta(days=1)
+
+# Day of the month cycles start on when neither the options nor the portal's
+# bills say: the integration's original default.
+DEFAULT_CYCLE_DAY = 23
 
 
 @dataclass(frozen=True)
@@ -51,8 +57,9 @@ class Rates:
     # charge every gallon at the tier-1 rate and in full for wastewater.
     wastewater_summer_months: str = "4,5,6,7,8,9,10,11"
     garbage_charge: float = 38.04
-    # Day of the month the meters are read; billing cycles start at midnight on it.
-    billing_day: int = 23
+    # Day of the month billing cycles start, at midnight. 0 takes each meter's
+    # own bill periods from the portal (see BillingCycles).
+    billing_day: int = 0
 
     @classmethod
     def from_options(cls, options: Mapping[str, Any]) -> Rates:
@@ -77,13 +84,18 @@ class RateSchedule:
     bill covers.
     """
 
-    def __init__(self, periods: Iterable[tuple[date | None, Rates]] = ()) -> None:
+    def __init__(
+        self,
+        periods: Iterable[tuple[date | None, Rates]] = (),
+        bill_cycles: BillingCycles | None = None,
+    ) -> None:
         periods = sorted(periods, key=lambda p: p[0] or date.min)
         self._periods: list[tuple[date | None, Rates]] = periods or [(None, Rates())]
         self._starts = [
             datetime(d.year, d.month, d.day, tzinfo=SITE_TZ) if d else None
             for d, _ in self._periods
         ]
+        self._bill_cycles = bill_cycles
 
     @classmethod
     def from_options(cls, options: Mapping[str, Any]) -> RateSchedule:
@@ -108,7 +120,11 @@ class RateSchedule:
     def with_rates(self, effective_from: date, rates: Rates) -> RateSchedule:
         """A copy with `rates` from `effective_from` until the next later set."""
         kept = [(d, r) for d, r in self._periods if d != effective_from]
-        return RateSchedule([*kept, (effective_from, rates)])
+        return RateSchedule([*kept, (effective_from, rates)], self._bill_cycles)
+
+    def with_bill_cycles(self, bill_cycles: BillingCycles | None) -> RateSchedule:
+        """A copy whose cycles follow a meter's bills, unless the rates name a day."""
+        return RateSchedule(self._periods, bill_cycles)
 
     @property
     def periods(self) -> list[tuple[date | None, Rates]]:
@@ -122,6 +138,14 @@ class RateSchedule:
     def billing_day(self) -> int:
         return self.latest.billing_day
 
+    @property
+    def cycles(self) -> BillingCycles:
+        """Where billing cycles start: on the day the rates name, or else on the
+        meter's own bill dates."""
+        if self.billing_day:
+            return BillingCycles(day=self.billing_day)
+        return self._bill_cycles or BillingCycles()
+
     def at(self, when: datetime) -> Rates:
         """The rates in effect at `when`."""
         for start, (_, rates) in zip(reversed(self._starts), reversed(self._periods)):
@@ -130,12 +154,68 @@ class RateSchedule:
         return self._periods[0][1]
 
 
-def _as_schedule(rates: Rates | RateSchedule) -> RateSchedule:
+def as_schedule(rates: Rates | RateSchedule) -> RateSchedule:
     return rates if isinstance(rates, RateSchedule) else RateSchedule([(None, rates)])
 
 
-def cycle_bounds(when: datetime, billing_day: int) -> tuple[datetime, datetime]:
-    """Return the start and end of the billing cycle containing `when`."""
+class BillingCycles:
+    """Where a meter's billing cycles start and end.
+
+    Within the bill periods the portal reports, cycles are exactly those
+    periods: LUS reads meters on a different day some months, so no single day
+    fits. Before the first period and after the last, cycles fall on that
+    period's day every month, so the open cycle is taken to end a month after
+    the last bill. With no periods, they fall on `day` every month.
+    """
+
+    def __init__(
+        self,
+        periods: Iterable[tuple[datetime, datetime]] = (),
+        day: int = DEFAULT_CYCLE_DAY,
+    ) -> None:
+        checked = validate_bill_periods(periods)
+        self._periods = [
+            (start.astimezone(SITE_TZ), end.astimezone(SITE_TZ))
+            for start, end in checked
+        ]
+        self._starts = [period[0] for period in self._periods]
+        self._day = day
+
+    @property
+    def last_bill_end(self) -> datetime | None:
+        """End of the newest bill period, if there are any."""
+        return self._periods[-1][1] if self._periods else None
+
+    def bounds(self, when: datetime) -> tuple[datetime, datetime]:
+        """Return the start and end of the billing cycle containing `when`."""
+        known = self._periods
+        if known and known[0][0] <= when < known[-1][1]:
+            period = known[bisect_right(self._starts, when) - 1]
+            # Validation guarantees reported history has no gaps, so this is an
+            # actual portal period rather than a pair of unrelated endpoints.
+            return period
+        if known and when >= known[-1][1]:
+            anchor = _projection_day(known[-1][1], known[-1][0])
+            start, end = _monthly_bounds(when, anchor)
+            return max(start, known[-1][1]), end
+        if known:
+            anchor = _projection_day(known[0][0], known[0][1])
+            start, end = _monthly_bounds(when, anchor)
+            return start, min(end, known[0][0])
+        return _monthly_bounds(when, self._day)
+
+
+def cycle_bounds(
+    when: datetime, cycles: int | BillingCycles
+) -> tuple[datetime, datetime]:
+    """Return the start and end of the billing cycle containing `when`, for
+    cycles starting on a day of the month or following a meter's bills."""
+    if isinstance(cycles, BillingCycles):
+        return cycles.bounds(when)
+    return _monthly_bounds(when, cycles)
+
+
+def _monthly_bounds(when: datetime, billing_day: int) -> tuple[datetime, datetime]:
     local = when.astimezone(SITE_TZ)
     start = _cycle_start(local.year, local.month, billing_day)
     if local < start:
@@ -145,7 +225,14 @@ def cycle_bounds(when: datetime, billing_day: int) -> tuple[datetime, datetime]:
 
 
 def _cycle_start(year: int, month: int, billing_day: int) -> datetime:
-    return datetime(year, month, min(billing_day, 28), tzinfo=SITE_TZ)
+    last_day = calendar.monthrange(year, month)[1]
+    return datetime(year, month, min(billing_day, last_day), tzinfo=SITE_TZ)
+
+
+def _projection_day(boundary: datetime, adjacent: datetime) -> int:
+    """Recover a month-end anchor when a reported boundary was clamped."""
+    last_day = calendar.monthrange(boundary.year, boundary.month)[1]
+    return max(boundary.day, adjacent.day) if boundary.day == last_day else boundary.day
 
 
 def _add_month(year: int, month: int, delta: int) -> tuple[int, int]:
@@ -156,18 +243,36 @@ def _add_month(year: int, month: int, delta: int) -> tuple[int, int]:
 class _Cycles:
     """Caches billing cycle lookups for a run of hours."""
 
-    def __init__(self, billing_day: int) -> None:
-        self._billing_day = billing_day
+    def __init__(self, cycles: int | BillingCycles) -> None:
+        self._cycles = cycles
         self._current: tuple[datetime, datetime] | None = None
 
     def bounds(self, hour: datetime) -> tuple[datetime, datetime]:
         if self._current is None or not self._current[0] <= hour < self._current[1]:
-            self._current = cycle_bounds(hour, self._billing_day)
+            self._current = cycle_bounds(hour, self._cycles)
         return self._current
 
     def hours(self, hour: datetime) -> float:
         start, end = self.bounds(hour)
-        return (end - start) / timedelta(hours=1)
+        elapsed = end.astimezone(timezone.utc) - start.astimezone(timezone.utc)
+        return elapsed / timedelta(hours=1)
+
+
+def fill_gaps(hours: Iterable[HourlyUsage]) -> list[HourlyUsage]:
+    """`hours` with a zero-use hour for each one missing between them.
+
+    The meter data can skip hours, but the bill's fixed charges and the other
+    meters' charges don't stop for them, so costs are worked out over every hour.
+    """
+    filled: list[HourlyUsage] = []
+    for h in hours:
+        if filled:
+            t = next_hour(filled[-1].start)
+            while t < h.start:
+                filled.append(HourlyUsage(t.astimezone(SITE_TZ), 0.0))
+                t = next_hour(t)
+        filled.append(h)
+    return filled
 
 
 def electricity_costs(
@@ -175,8 +280,8 @@ def electricity_costs(
 ) -> list[HourlyUsage]:
     """Cost per hour: kWh at the energy and fuel adjustment rates, plus the
     customer charge spread evenly over the billing cycle."""
-    schedule = _as_schedule(rates)
-    cycles = _Cycles(schedule.billing_day)
+    schedule = as_schedule(rates)
+    cycles = _Cycles(schedule.cycles)
     costs = []
     for h in hours:
         r = schedule.at(h.start)
@@ -202,8 +307,8 @@ def water_costs(
     Where the rates leave the limit at 0, it's the average in `winters` for the
     winter before the bill (see `winter_average`); with none, there are no tiers.
     """
-    schedule = _as_schedule(rates)
-    cycles = _Cycles(schedule.billing_day)
+    schedule = as_schedule(rates)
+    cycles = _Cycles(schedule.cycles)
     costs = []
     cycle_start = None
     used = 0.0
@@ -258,12 +363,14 @@ def _limit_winter(year: int, month: int) -> int | None:
     return None if month in WINTER_MONTHS else year
 
 
-def winter_cycles(winter: int, billing_day: int) -> list[tuple[datetime, datetime]]:
+def winter_cycles(
+    winter: int, cycles: int | BillingCycles
+) -> list[tuple[datetime, datetime]]:
     """The cycles of the December-March bills of the winter whose March bill
     falls in `winter`."""
     months = ((winter - 1, 12), (winter, 1), (winter, 2), (winter, 3))
     # The cycle holding the 1st of a month is the one billed in that month.
-    return [cycle_bounds(datetime(y, m, 1, tzinfo=SITE_TZ), billing_day) for y, m in months]
+    return [cycle_bounds(datetime(y, m, 1, tzinfo=SITE_TZ), cycles) for y, m in months]
 
 
 def winter_average(
@@ -304,8 +411,8 @@ def winters_needed(
 ) -> dict[int, datetime]:
     """Winters whose average sets the tier-1 limit of a summer bill in `hours`
     whose rates leave the limit at 0, each with the first hour that needs it."""
-    schedule = _as_schedule(rates)
-    cycles = _Cycles(schedule.billing_day)
+    schedule = as_schedule(rates)
+    cycles = _Cycles(schedule.cycles)
     needed: dict[int, datetime] = {}
     for h in hours:
         r = schedule.at(h.start)
@@ -318,8 +425,8 @@ def winters_needed(
 
 def garbage_cost(hour: datetime, rates: Rates | RateSchedule) -> float:
     """The flat garbage charge spread evenly over the billing cycle."""
-    schedule = _as_schedule(rates)
-    return schedule.at(hour).garbage_charge / _Cycles(schedule.billing_day).hours(hour)
+    schedule = as_schedule(rates)
+    return schedule.at(hour).garbage_charge / _Cycles(schedule.cycles).hours(hour)
 
 
 @dataclass(frozen=True)
@@ -341,20 +448,26 @@ class BillEstimate:
         """The cost so far scaled to the whole cycle, at the same hourly rate."""
         if self.data_through is None:
             return None
-        covered = (self.data_through - self.cycle_start) / timedelta(hours=1)
-        whole = (self.cycle_end - self.cycle_start) / timedelta(hours=1)
+        covered = (
+            self.data_through.astimezone(timezone.utc)
+            - self.cycle_start.astimezone(timezone.utc)
+        ) / timedelta(hours=1)
+        whole = (
+            self.cycle_end.astimezone(timezone.utc)
+            - self.cycle_start.astimezone(timezone.utc)
+        ) / timedelta(hours=1)
         return self.cost * whole / covered if covered > 0 else None
 
 
 def bill_estimates(
-    total_hours: Iterable[HourlyUsage], billing_day: int, now: datetime
+    total_hours: Iterable[HourlyUsage], cycles: int | BillingCycles, now: datetime
 ) -> tuple[BillEstimate, BillEstimate]:
     """The current cycle (the one containing `now`) and the one before it.
 
     `total_hours` must cover both cycles from their start for the sums to be whole.
     """
-    current_start, current_end = cycle_bounds(now, billing_day)
-    previous_start, _ = cycle_bounds(current_start - timedelta(seconds=1), billing_day)
+    current_start, current_end = cycle_bounds(now, cycles)
+    previous_start, _ = cycle_bounds(current_start - timedelta(seconds=1), cycles)
 
     hours = list(total_hours)
 

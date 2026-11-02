@@ -10,10 +10,13 @@ from custom_components.lus import (
     coordinator as coord,
     migrate_options_1_2,
     migrate_options_1_3,
+    migrate_options_1_4,
+    migrate_options_1_5,
 )
 from custom_components.lus.api import HourlyUsage, Meter, Read
 from custom_components.lus.cost import (
     SITE_TZ,
+    BillingCycles,
     Rates,
     RateSchedule,
     electricity_costs,
@@ -87,6 +90,22 @@ def test_upgrade_to_the_automatic_limit_recalculates_only_unsaved_rates():
     assert migrate_options_1_3({}) == {"recalculate_from": "2000-01-01"}
 
 
+def test_upgrade_to_costs_covering_skipped_hours_recalculates_everything():
+    saved = {"rate_schedule": SCHEDULE.as_options()}
+    assert migrate_options_1_4(saved) == {**saved, "recalculate_from": "2000-01-01"}
+
+
+def test_upgrade_to_bill_dates_moves_the_old_default_day_and_recalculates():
+    old_default = Rates(billing_day=23)
+    chosen = Rates(billing_day=10)
+    options = RateSchedule([(None, old_default), (date(2026, 9, 23), chosen)]).as_options()
+    migrated = migrate_options_1_5({"rate_schedule": options})
+
+    assert [e["billing_day"] for e in migrated["rate_schedule"]] == [0, 10]
+    assert migrated["recalculate_from"] == "2000-01-01"
+    assert migrate_options_1_5({"billing_day": 23})["billing_day"] == 0  # 0.2.x
+
+
 def test_costs_switch_rates_at_the_effective_date():
     hours = [
         HourlyUsage(local(2026, 10, 22, 23), 1.0),
@@ -119,6 +138,15 @@ def quarter_reads(start: datetime, count: int) -> list[Read]:
     return [Read(start + i * step, start + (i + 1) * step, 0.5) for i in range(count)]
 
 
+def hourly_usage(start: datetime, end: datetime, value: float) -> list[HourlyUsage]:
+    hours = []
+    hour = start.astimezone(timezone.utc)
+    while hour < end.astimezone(timezone.utc):
+        hours.append(HourlyUsage(hour.astimezone(SITE_TZ), value))
+        hour += timedelta(hours=1)
+    return hours
+
+
 class FakeClient:
     def __init__(self, reads):
         self.reads = reads
@@ -127,6 +155,11 @@ class FakeClient:
     async def async_get_reads(self, meter, start, end):
         self.requests.append((start, end))
         return [r for r in self.reads if start <= r.start.date() <= end]
+
+    async def async_get_bill_periods(self, meter):
+        return self.periods
+
+    periods: list = []
 
 
 @pytest.fixture
@@ -159,6 +192,8 @@ def harness(monkeypatch):
         c.hass = SimpleNamespace(config=SimpleNamespace(currency="USD"))
         c.client = FakeClient(reads)
         c._winters = {}
+        c._bill_ends = {}
+        c.cycles = None
         return c
 
     return SimpleNamespace(make=make, added=added, last=last, history=history, queries=queries)
@@ -183,7 +218,7 @@ async def test_recalculation_overwrites_costs_from_the_date(harness):
     cost = harness.added[0][1]
     assert cost[0]["start"] == recalc
     assert len(cost) == 3 * 24
-    hourly_fixed = 13.00 / (31 * 24)  # 10/23-11/23 cycle
+    hourly_fixed = 13.00 / (31 * 24 + 1)  # 10/23-11/23 crosses the fall DST change
     assert cost[0]["state"] == pytest.approx(2.0 * 0.09624 + hourly_fixed)
     assert cost[0]["sum"] == pytest.approx(50.0 + cost[0]["state"])
 
@@ -234,15 +269,188 @@ async def test_update_clears_the_recalculation_date(harness, monkeypatch):
     assert updated["rate_schedule"] == SCHEDULE.as_options()
 
 
+# Made-up bill periods, the last closing on 10/22.
+BILLS = [
+    (local(2026, 8, 21), local(2026, 9, 24)),
+    (local(2026, 9, 24), local(2026, 10, 22)),
+]
+
+
+def update_harness(harness, reads, fail=False):
+    """A coordinator whose update runs against the fake client and recorder."""
+    c = harness.make(reads)
+    c.client.periods = BILLS
+    updated = {}
+
+    class Entries:
+        def async_update_entry(self, entry, options):
+            updated.update(options)
+
+    c.hass.config_entries = Entries()
+    c.config_entry = SimpleNamespace(options={"rate_schedule": SCHEDULE.as_options()})
+
+    async def no_op(*args):
+        return None
+
+    async def meters():
+        return [METER]
+
+    async def broken(*args):
+        raise coord.LusError("portal down")
+
+    c.client.async_login = no_op
+    c.client.account_id = "5000000000"
+    c.client.async_get_meters = meters
+    if fail:
+        c.client.async_get_reads = broken
+    return c, updated
+
+
+async def test_update_recosts_the_cycle_the_newest_bill_closed(harness):
+    harness.last[CONSUMPTION_ID] = [{"start": datetime(2026, 10, 25, tzinfo=CDT).timestamp(), "sum": 1.0}]
+    c, updated = update_harness(harness, [])
+    await c._async_update_data()
+
+    # Cost and total were looked up from the start of the cycle the bill closed.
+    assert {stat_id for stat_id, _, end in harness.queries if end == BILLS[1][0]} == {
+        COST_ID, "lus:5000000000_total_cost"
+    }
+    assert c._bill_ends == {METER.uuid: BILLS[1][1]}
+    assert c.cycles.bounds(local(2026, 10, 1)) == BILLS[1]
+    assert updated == {}  # nothing to clear from the options
+
+
+async def test_update_costs_each_hour_in_its_bill_period(harness):
+    # By the bills, 10/20 is in the 9/24-10/22 period: 28 days, not 9/23-10/23's 30.
+    reads = quarter_reads(datetime(2026, 10, 20, tzinfo=CDT), 4 * 24 * 3)
+    c, _ = update_harness(harness, reads)
+    await c._async_update_data()
+
+    cost = next(stats for stat_id, stats in harness.added if stat_id == COST_ID)
+    noon = next(s for s in cost if s["start"] == datetime(2026, 10, 20, 12, tzinfo=CDT))
+    assert noon["state"] == pytest.approx(2.0 * (0.05224 + 0.050) + 13.00 / (28 * 24))
+
+
+async def test_staggered_meter_cycles_keep_the_account_cycles_first_day(harness, monkeypatch):
+    electric = Meter("elec-uuid", "1000000001", "ELECTRICITY", "HOUR", date(2026, 9, 24))
+    water = Meter("water-uuid", "1000000002", "WATER", "HOUR", date(2026, 9, 24))
+    electric_bills = [
+        (local(2026, 8, 24), local(2026, 9, 24)),
+        (local(2026, 9, 24), local(2026, 10, 24)),
+    ]
+    water_bills = [
+        (local(2026, 8, 25), local(2026, 9, 25)),
+        (local(2026, 9, 25), local(2026, 10, 25)),
+    ]
+    reads = {
+        electric.uuid: [
+            Read(hour.start, hour.start + timedelta(hours=1), hour.value)
+            for hour in hourly_usage(local(2026, 9, 24), local(2026, 10, 28), 1.0)
+        ],
+        water.uuid: [
+            Read(hour.start, hour.start + timedelta(hours=1), hour.value)
+            for hour in hourly_usage(local(2026, 9, 24), local(2026, 10, 28), 10.0)
+        ],
+    }
+    c = harness.make([])
+    requests = {electric.uuid: [], water.uuid: []}
+
+    async def get_reads(meter, start, end):
+        requests[meter.uuid].append((start, end))
+        return [r for r in reads[meter.uuid] if start <= r.start.date() <= end]
+
+    async def get_periods(meter):
+        return electric_bills if meter is electric else water_bills
+
+    async def meters():
+        return [electric, water]
+
+    async def no_op(*args):
+        return None
+
+    c.client.async_get_reads = get_reads
+    c.client.async_get_bill_periods = get_periods
+    c.client.async_get_meters = meters
+    c.client.async_login = no_op
+    c.client.account_id = "5000000000"
+    c._bill_ends = {
+        electric.uuid: electric_bills[-1][1],
+        water.uuid: water_bills[-1][1],
+    }
+    c.hass.config_entries = SimpleNamespace(async_update_entry=lambda *args, **kwargs: None)
+    rates = RateSchedule([(None, Rates(water_tier1_gallons=100_000))])
+    c.config_entry = SimpleNamespace(options={"rate_schedule": rates.as_options()})
+
+    latest = local(2026, 10, 26, 23).timestamp()
+    for meter in (electric, water):
+        harness.last[coord.statistic_id(meter)] = [{"start": latest, "sum": 1.0}]
+        harness.last[coord.cost_statistic_id(meter)] = [{"start": latest, "sum": 1.0}]
+    harness.last[coord.total_cost_statistic_id(c.client.account_id)] = [
+        {"start": latest, "sum": 1.0}
+    ]
+
+    captured = []
+    real_total_costs = coord.total_costs
+
+    def capture_total_costs(costs, account_rates):
+        totals = real_total_costs(costs, account_rates)
+        captured.extend(totals)
+        return totals
+
+    monkeypatch.setattr(coord, "total_costs", capture_total_costs)
+    data = await c._async_update_data()
+
+    # Water's own previous cycle starts on 9/25, but account billing starts on
+    # 9/24. Both meter histories must cover that first account day, and no more.
+    assert requests[electric.uuid] == [
+        (date(2026, 9, 24), date(2026, 10, 23)),
+        (date(2026, 10, 24), date(2026, 10, 27)),
+    ]
+    assert requests[water.uuid] == requests[electric.uuid]
+    assert captured[0].start == local(2026, 9, 24)
+    first_day = [hour for hour in captured if hour.start < local(2026, 9, 25)]
+    assert len(first_day) == 24
+    assert data.previous.cost == pytest.approx(
+        sum(hour.value for hour in captured if local(2026, 9, 24) <= hour.start < local(2026, 10, 24))
+    )
+    assert data.previous.cost > sum(
+        hour.value for hour in captured if local(2026, 9, 25) <= hour.start < local(2026, 10, 24)
+    )
+
+
+async def test_a_failed_update_doesnt_remember_the_bill(harness):
+    c, _ = update_harness(harness, [], fail=True)
+    with pytest.raises(coord.UpdateFailed):
+        await c._async_update_data()
+    assert c._bill_ends == {}  # so the next update costs that cycle again
+
+
+async def test_malformed_bill_reads_become_update_failed(harness):
+    from custom_components.lus.api import parse_bill_periods
+
+    c, _ = update_harness(harness, [])
+
+    async def malformed_periods(meter):
+        return parse_bill_periods({"reads": {}})
+
+    c.client.async_get_bill_periods = malformed_periods
+
+    with pytest.raises(
+        coord.UpdateFailed, match=r"billing response 'reads' must be a sequence"
+    ):
+        await c._async_update_data()
+
+
 # --- Options flow ----------------------------------------------------------
 
 
 class Flow(flow_mod.LusOptionsFlow):
     options: dict = {}
+    runtime_data = None
 
     @property
     def config_entry(self):
-        return SimpleNamespace(options=self.options)
+        return SimpleNamespace(options=self.options, runtime_data=self.runtime_data)
 
 
 def make_flow(options):
@@ -257,6 +465,15 @@ async def test_flow_defaults_to_the_latest_closed_cycle(monkeypatch):
     result = await make_flow({}).async_step_init()
     (field,) = result["data_schema"].schema
     assert field.default() == "2026-09-23"
+
+
+async def test_flow_defaults_to_the_last_bill_period(monkeypatch):
+    monkeypatch.setattr(flow_mod.dt_util, "now", lambda tz=None: local(2026, 10, 31, 9))
+    flow = make_flow({})
+    flow.runtime_data = SimpleNamespace(cycles=BillingCycles(BILLS))
+    result = await flow.async_step_init()
+    (field,) = result["data_schema"].schema
+    assert field.default() == "2026-09-24"
 
 
 async def test_flow_saves_dated_rates_and_requests_recalculation(monkeypatch):

@@ -7,7 +7,7 @@ import pytest
 
 from custom_components.lus import coordinator as coord
 from custom_components.lus.api import HourlyUsage, Meter
-from custom_components.lus.cost import SITE_TZ, Rates, bill_estimates
+from custom_components.lus.cost import BillEstimate, SITE_TZ, Rates, bill_estimates
 from custom_components.lus.sensor import SENSORS, LusBillSensor
 
 CDT = timezone(timedelta(hours=-5))
@@ -44,8 +44,27 @@ def test_current_and_previous_cycles():
 
 def test_projection_scales_to_the_whole_cycle():
     current, _ = bill_estimates(HOURS, 23, NOW)
-    # $1/h over the 31-day 10/23-11/23 cycle
-    assert current.projected == pytest.approx(31 * 24 * 1.0)
+    # $1 per elapsed hour over the fall-DST 10/23-11/23 cycle.
+    assert current.projected == pytest.approx(31 * 24 + 1)
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "through", "elapsed_hours"),
+    [
+        (local(2026, 2, 23), local(2026, 3, 25), local(2026, 3, 1), 144),
+        (local(2026, 10, 23), local(2026, 11, 22), local(2026, 10, 30), 168),
+    ],
+)
+def test_projection_preserves_fixed_charge_across_dst(
+    start, end, through, elapsed_hours
+):
+    whole_hours = (end.timestamp() - start.timestamp()) / 3600
+    fixed_charge = whole_hours
+    accumulated = elapsed_hours * fixed_charge / whole_hours
+
+    estimate = BillEstimate(start, end, accumulated, through)
+
+    assert estimate.projected == pytest.approx(fixed_charge)
 
 
 def test_cycle_without_data():
@@ -75,7 +94,7 @@ def test_sensors_report_rounded_dollars_and_period():
         "data_through": "2026-10-29T23:59:59-05:00",
         "complete": False,
     }
-    assert make_sensor("projected_bill", data).native_value == 744.0
+    assert make_sensor("projected_bill", data).native_value == 745.0
     last = make_sensor("last_bill", data)
     assert last.native_value == 360.0
     assert last.extra_state_attributes["complete"] is True
