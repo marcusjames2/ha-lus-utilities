@@ -8,11 +8,11 @@ which has its own login and API path. This integration talks to it directly.
 
 > **Disclaimer:** This is an unofficial, independent project. It is not
 > affiliated with, endorsed by, or supported by Lafayette Utilities System
-> (LUS), the Lafayette Utilities Authority, or Opower/Oracle. The LUS name and
-> logo belong to their owner and are used only to identify the utility. Cost
-> figures are estimates; your LUS bill is the authoritative amount. The
-> integration reads the same customer portal you sign in to, so changes to that
-> portal may break it.
+> (LUS), the Lafayette Utilities Authority, or Opower/Oracle. The LUS name
+> belongs to its owner and is used only to identify the utility; the
+> integration's icon is a generic design. Cost figures are estimates; your LUS
+> bill is the authoritative amount. The integration reads the same customer
+> portal you sign in to, so changes to that portal may break it.
 
 ## What it imports
 
