@@ -266,6 +266,11 @@ def winter_cycles(winter: int, billing_day: int) -> list[tuple[datetime, datetim
     return [cycle_bounds(datetime(y, m, 1, tzinfo=SITE_TZ), billing_day) for y, m in months]
 
 
+def latest_completed_winter(today: date) -> int:
+    """Most recent December-March winter, named for its March bill year."""
+    return today.year if today.month >= 4 else today.year - 1
+
+
 def winter_average(
     hours: Iterable[HourlyUsage], cycles: list[tuple[datetime, datetime]]
 ) -> tuple[float | None, bool]:

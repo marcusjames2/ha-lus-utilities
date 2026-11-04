@@ -71,6 +71,9 @@
       },
       "last_bill": {
         "name": "Estimated last bill"
+      },
+      "winter_water_average": {
+        "name": "Winter water average"
       }
     }
   }

@@ -8,6 +8,7 @@ import pytest
 from custom_components.lus.api import (
     LusAuthError,
     LusClient,
+    LusError,
     Meter,
     Read,
     parse_meters,
@@ -89,6 +90,123 @@ def test_parse_reads_skips_missing_values():
     assert reads[0].value == pytest.approx(0.144)
 
 
+def test_parse_reads_accepts_an_explicit_empty_collection():
+    assert parse_reads({"reads": []}) == []
+
+
+@pytest.mark.parametrize(
+    "empty_interval",
+    [
+        {},
+        {"consumption": None},
+        {"consumption": {}},
+        {"consumption": {"value": None}},
+    ],
+)
+def test_parse_reads_skips_legitimate_empty_intervals(empty_interval):
+    assert parse_reads({"reads": [empty_interval]}) == []
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (None, "expected a JSON object"),
+        ([], "expected a JSON object"),
+        ({}, "missing 'reads'"),
+        ({"reads": None}, "'reads' must be a list"),
+        ({"reads": {}}, "'reads' must be a list"),
+    ],
+)
+def test_parse_reads_rejects_malformed_payloads(body, message):
+    with pytest.raises(LusError, match=message):
+        parse_reads(body)
+
+
+VALID_READ = {
+    "startTime": "2026-10-26T00:00:00.000-05:00",
+    "endTime": "2026-10-26T00:15:00.000-05:00",
+    "consumption": {"value": 0.144},
+}
+
+
+@pytest.mark.parametrize(
+    ("item", "message"),
+    [
+        (None, r"read\[0\].*JSON object"),
+        ([], r"read\[0\].*JSON object"),
+        ({"consumption": "missing"}, r"read\[0\].*consumption.*JSON object or null"),
+        ({"consumption": []}, r"read\[0\].*consumption.*JSON object or null"),
+        (
+            {**VALID_READ, "startTime": None},
+            r"read\[0\].*startTime.*timezone-aware ISO 8601 string",
+        ),
+        (
+            {key: value for key, value in VALID_READ.items() if key != "startTime"},
+            r"read\[0\].*startTime.*timezone-aware ISO 8601 string",
+        ),
+        (
+            {**VALID_READ, "startTime": "not-a-date"},
+            r"read\[0\].*startTime.*timezone-aware ISO 8601 string",
+        ),
+        (
+            {**VALID_READ, "startTime": "2026-10-26T00:00:00"},
+            r"read\[0\].*startTime.*timezone-aware ISO 8601 string",
+        ),
+        (
+            {**VALID_READ, "endTime": 123},
+            r"read\[0\].*endTime.*timezone-aware ISO 8601 string",
+        ),
+        (
+            {key: value for key, value in VALID_READ.items() if key != "endTime"},
+            r"read\[0\].*endTime.*timezone-aware ISO 8601 string",
+        ),
+        (
+            {**VALID_READ, "endTime": "2026-10-26"},
+            r"read\[0\].*endTime.*timezone-aware ISO 8601 string",
+        ),
+        (
+            {**VALID_READ, "consumption": {"value": "0.144"}},
+            r"read\[0\].*consumption.value.*finite number",
+        ),
+        (
+            {**VALID_READ, "consumption": {"value": True}},
+            r"read\[0\].*consumption.value.*finite number",
+        ),
+        (
+            {**VALID_READ, "consumption": {"value": float("nan")}},
+            r"read\[0\].*consumption.value.*finite number",
+        ),
+        (
+            {**VALID_READ, "consumption": {"value": float("inf")}},
+            r"read\[0\].*consumption.value.*finite number",
+        ),
+        (
+            {**VALID_READ, "consumption": {"value": 10**1000}},
+            r"read\[0\].*consumption.value.*finite number",
+        ),
+    ],
+)
+def test_parse_reads_rejects_malformed_individual_reads(item, message):
+    with pytest.raises(LusError, match=message):
+        parse_reads({"reads": [item]})
+
+
+def test_parse_reads_error_identifies_later_read_index():
+    with pytest.raises(LusError, match=r"read\[1\].*consumption.value"):
+        parse_reads({"reads": [VALID_READ, {**VALID_READ, "consumption": {"value": {}}}]})
+
+
+def test_parse_reads_accepts_integer_and_float_consumption():
+    second = {
+        **VALID_READ,
+        "startTime": "2026-10-26T00:15:00.000-05:00",
+        "endTime": "2026-10-26T00:30:00.000-05:00",
+        "consumption": {"value": 2},
+    }
+    reads = parse_reads({"reads": [VALID_READ, second]})
+    assert [read.value for read in reads] == pytest.approx([0.144, 2.0])
+
+
 def test_to_hourly_sums_quarter_hours_and_holds_back_partial_last_hour():
     start = datetime(2026, 10, 26, tzinfo=CDT)
     hours = to_hourly(quarter_reads(start, 4 * 24 + 2), reads_per_hour=4)
@@ -128,11 +246,13 @@ def test_statistic_id_is_valid():
 
 
 class FakeResponse:
-    def __init__(self, status: int, body: dict) -> None:
+    def __init__(self, status: int, body) -> None:
         self.status = status
         self._body = body
 
     async def json(self, content_type=None):
+        if isinstance(self._body, Exception):
+            raise self._body
         return self._body
 
     async def __aenter__(self):
@@ -210,6 +330,30 @@ async def test_login_and_reads_send_expected_headers():
     assert reads["params"]["aggregateType"] == "quarter_hour"
     assert reads["params"]["startDate"] == "2026-10-26"
     assert reads["params"]["endDate"] == "2026-10-27"
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (ValueError("not json"), "not valid JSON"),
+        ("not an object", "expected a JSON object"),
+        ({}, "missing 'reads'"),
+        ({"reads": "not a list"}, "'reads' must be a list"),
+        ({"reads": [None]}, r"read\[0\].*JSON object"),
+        (
+            {"reads": [{"consumption": {"value": "1.0"}}]},
+            r"read\[0\].*consumption.value.*finite number",
+        ),
+    ],
+)
+async def test_get_reads_rejects_malformed_success_responses(body, message):
+    session = FakeSession(login_responses() + [("GET", READS, 200, body)])
+    client = LusClient(session, "user", "pw")
+    await client.async_login()
+
+    meter = Meter("elec-uuid", "1000000001", "ELECTRICITY", "QUARTER_HOUR", None)
+    with pytest.raises(LusError, match=message):
+        await client.async_get_reads(meter, date(2026, 10, 26), date(2026, 10, 27))
 
 
 async def test_expired_session_logs_in_again_once():

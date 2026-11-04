@@ -5,10 +5,11 @@ Kept free of Home Assistant imports so it can be run and tested on its own.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import json
+import math
 from typing import Any
 
 import aiohttp
@@ -150,6 +151,7 @@ class LusClient:
                 "includeEnhancedBilling": "false",
                 "includeMultiRegisterData": "false",
             },
+            strict_json=True,
         )
         return parse_reads(body)
 
@@ -161,7 +163,8 @@ class LusClient:
         entities: bool = True,
         account_only: bool = False,
         retry: bool = True,
-    ) -> dict[str, Any]:
+        strict_json: bool = False,
+    ) -> Any:
         if self._token is None:
             raise LusAuthError("Not logged in")
         headers = {
@@ -179,7 +182,7 @@ class LusClient:
         async with self._session.get(
             f"{BASE_URL}/{path}", params=params, headers=headers
         ) as resp:
-            body = await _json(resp)
+            body = await _json(resp, strict=strict_json and resp.status == 200)
             status = resp.status
         if status == 401 and retry:
             # Sessions expire; log in again once and repeat the call.
@@ -190,6 +193,7 @@ class LusClient:
                 entities=entities,
                 account_only=account_only,
                 retry=False,
+                strict_json=strict_json,
             )
         if status == 401:
             raise LusAuthError("Session rejected after re-login")
@@ -199,12 +203,14 @@ class LusClient:
         return body
 
 
-async def _json(resp: aiohttp.ClientResponse) -> dict[str, Any]:
+async def _json(resp: aiohttp.ClientResponse, *, strict: bool = False) -> Any:
     try:
         body = await resp.json(content_type=None)
     except (aiohttp.ContentTypeError, ValueError):
+        if strict:
+            raise LusError("Malformed reads response: body was not valid JSON") from None
         return {}
-    return body if isinstance(body, dict) else {}
+    return body if strict or isinstance(body, dict) else {}
 
 
 def parse_meters(meta: dict[str, Any]) -> list[Meter]:
@@ -227,21 +233,73 @@ def parse_meters(meta: dict[str, Any]) -> list[Meter]:
     return meters
 
 
-def parse_reads(body: dict[str, Any]) -> list[Read]:
+def parse_reads(body: Any) -> list[Read]:
     """Build reads from a DataBrowser reads response, skipping empty intervals."""
+    if not isinstance(body, dict):
+        raise LusError("Malformed reads response: expected a JSON object")
+    if "reads" not in body:
+        raise LusError("Malformed reads response: missing 'reads'")
+    items = body["reads"]
+    if not isinstance(items, list):
+        raise LusError("Malformed reads response: 'reads' must be a list")
+
     reads = []
-    for item in body.get("reads") or []:
-        value = (item.get("consumption") or {}).get("value")
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            raise LusError(
+                f"Malformed reads response: read[{index}] must be a JSON object"
+            )
+
+        consumption = item.get("consumption")
+        if consumption is None:
+            continue
+        if not isinstance(consumption, Mapping):
+            raise LusError(
+                "Malformed reads response: "
+                f"read[{index}].consumption must be a JSON object or null"
+            )
+        value = consumption.get("value")
         if value is None:
             continue
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            numeric_value = math.nan
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(numeric_value)
+        ):
+            raise LusError(
+                "Malformed reads response: "
+                f"read[{index}].consumption.value must be a finite number"
+            )
+
         reads.append(
             Read(
-                start=datetime.fromisoformat(item["startTime"]),
-                end=datetime.fromisoformat(item["endTime"]),
-                value=float(value),
+                start=_read_datetime(item, "startTime", index),
+                end=_read_datetime(item, "endTime", index),
+                value=numeric_value,
             )
         )
     return reads
+
+
+def _read_datetime(item: Mapping[str, Any], field: str, index: int) -> datetime:
+    """Return one required timezone-aware read timestamp."""
+    value = item.get(field)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            pass
+        else:
+            if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+                return parsed
+    raise LusError(
+        "Malformed reads response: "
+        f"read[{index}].{field} must be a timezone-aware ISO 8601 string"
+    )
 
 
 def to_hourly(

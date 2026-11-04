@@ -8,7 +8,7 @@ import pytest
 from custom_components.lus import coordinator as coord
 from custom_components.lus.api import HourlyUsage, Meter
 from custom_components.lus.cost import SITE_TZ, Rates, bill_estimates
-from custom_components.lus.sensor import SENSORS, LusBillSensor
+from custom_components.lus.sensor import SENSORS, LusBillSensor, LusWinterAverageSensor
 
 CDT = timezone(timedelta(hours=-5))
 
@@ -63,7 +63,12 @@ def make_sensor(key, data):
 
 def test_sensors_report_rounded_dollars_and_period():
     current, previous = bill_estimates(HOURS, 23, NOW)
-    data = coord.LusData("5000000000", current, previous)
+    data = coord.LusData(
+        "5000000000",
+        current,
+        previous,
+        coord.WinterAverageData(2026, "1000000002", 20470.456),
+    )
 
     this_period = make_sensor("current_bill", data)
     assert this_period.native_value == 168.0
@@ -79,6 +84,39 @@ def test_sensors_report_rounded_dollars_and_period():
     last = make_sensor("last_bill", data)
     assert last.native_value == 360.0
     assert last.extra_state_attributes["complete"] is True
+
+
+def test_winter_average_sensor_reports_gallons_and_source():
+    current, previous = bill_estimates(HOURS, 23, NOW)
+    data = coord.LusData(
+        "5000000000",
+        current,
+        previous,
+        coord.WinterAverageData(2026, "1000000002", 20470.456),
+    )
+    sensor = LusWinterAverageSensor(SimpleNamespace(data=data), "5000000000")
+
+    assert sensor.native_value == 20470.46
+    assert sensor.native_unit_of_measurement == "gal"
+    assert sensor.unique_id == "5000000000_winter_water_average"
+    assert sensor.extra_state_attributes == {
+        "winter_year": 2026,
+        "water_meter_id": "1000000002",
+    }
+
+
+def test_winter_average_sensor_is_unknown_without_usable_complete_reads():
+    current, previous = bill_estimates(HOURS, 23, NOW)
+    data = coord.LusData(
+        "5000000000", current, previous, coord.WinterAverageData(2026, None, None)
+    )
+    sensor = LusWinterAverageSensor(SimpleNamespace(data=data), "5000000000")
+
+    assert sensor.native_value is None
+    assert sensor.extra_state_attributes == {
+        "winter_year": 2026,
+        "water_meter_id": None,
+    }
 
 
 def test_sensors_are_unknown_before_first_data():

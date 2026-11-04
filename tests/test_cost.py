@@ -11,6 +11,7 @@ from custom_components.lus.cost import (
     cycle_bounds,
     electricity_costs,
     garbage_cost,
+    latest_completed_winter,
     water_costs,
     winter_average,
     winter_cycles,
@@ -124,6 +125,19 @@ def test_winter_cycles():
     first_of_month = winter_cycles(2026, 1)
     assert first_of_month[0][0].date() == date(2025, 12, 1)
     assert first_of_month[-1][1].date() == date(2026, 4, 1)
+
+
+@pytest.mark.parametrize(
+    ("today", "winter"),
+    [
+        (date(2026, 1, 1), 2025),
+        (date(2026, 3, 31), 2025),
+        (date(2026, 4, 1), 2026),
+        (date(2026, 12, 31), 2026),
+    ],
+)
+def test_latest_completed_winter_uses_the_march_bill_year(today, winter):
+    assert latest_completed_winter(today) == winter
 
 
 def test_winter_average_is_the_mean_of_december_through_march_bills():

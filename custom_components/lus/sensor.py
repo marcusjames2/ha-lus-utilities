@@ -11,7 +11,9 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
+    SensorStateClass,
 )
+from homeassistant.const import UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -59,8 +61,13 @@ async def async_setup_entry(
 ) -> None:
     coordinator = entry.runtime_data
     async_add_entities(
-        LusBillSensor(coordinator, entry.unique_id, hass.config.currency, description)
-        for description in SENSORS
+        [
+            *(
+                LusBillSensor(coordinator, entry.unique_id, hass.config.currency, description)
+                for description in SENSORS
+            ),
+            LusWinterAverageSensor(coordinator, entry.unique_id),
+        ]
     )
 
 
@@ -117,4 +124,42 @@ class LusBillSensor(CoordinatorEntity[LusCoordinator], SensorEntity):
                 else None
             ),
             "complete": bill.complete,
+        }
+
+
+class LusWinterAverageSensor(CoordinatorEntity[LusCoordinator], SensorEntity):
+    """Calculated average use for the latest completed December-March winter."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "winter_water_average"
+    _attr_native_unit_of_measurement = UnitOfVolume.GALLONS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, coordinator: LusCoordinator, account_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{account_id}_winter_water_average"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, account_id)},
+            name="LUS",
+            manufacturer="Lafayette Utilities System",
+            entry_type=DeviceEntryType.SERVICE,
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data
+        if data is None or data.winter_average.gallons is None:
+            return None
+        return round(data.winter_average.gallons, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        data = self.coordinator.data
+        if data is None:
+            return None
+        winter = data.winter_average
+        return {
+            "winter_year": winter.year,
+            "water_meter_id": winter.water_meter_id,
         }

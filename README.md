@@ -54,19 +54,15 @@ from your bill's rates and adds three more statistics:
 - The tier-1 limit is the household's average water use over the previous
   December–March bills, which LUS recalculates each year. By default (a limit
   of 0 in the options) the integration works it out from the water meter's
-  reads for those bills and logs it ("Winter 2026 average for meter …") so
-  you can compare it with your bill. Home Assistant hides info-level logs
-  by default; to see the line, add this to `configuration.yaml` and restart:
-
-  ```yaml
-  logger:
-    default: warning
-    logs:
-      custom_components.lus: info
-  ```
-
-  A bill missing up to a day of reads is
-  scaled up to its whole cycle; one missing more is left out of the average.
+  reads for those bills. The **Winter water average** sensor on the LUS device
+  exposes the result in gallons so you can compare it with your bill. Its
+  `winter_year` attribute is the year of the March bill and its
+  `water_meter_id` identifies the source meter. The sensor uses the latest
+  completed winter (the current year from April through December, or the prior
+  year from January through March). It remains unknown when there is no water
+  meter, no usable reads, or the winter is incomplete. A bill missing up to a
+  day of reads is scaled up to its whole cycle; one missing more is left out of
+  the average.
   Until the March bill's reads are all in (at most a week), the cost of later
   hours waits for them. With no reads from that winter, summer bills have no
   tiers and are charged wastewater on every gallon.
@@ -86,7 +82,7 @@ water source, or every gallon counts twice. To see the whole estimated bill,
 add a Statistics graph card for `LUS total cost …` with the "change" stat and a
 monthly period.
 
-**Bill sensors:** an **LUS** device with three sensors, which the Overview
+**Account sensors:** an **LUS** device with four sensors, which the Overview
 dashboard shows automatically (or add them to any dashboard):
 
 | Sensor | Value |
@@ -94,10 +90,12 @@ dashboard shows automatically (or add them to any dashboard):
 | Estimated bill this period | Estimated charges since the last meter read, through the newest data |
 | Projected bill this period | That amount scaled to the whole billing period at the same hourly rate |
 | Estimated last bill | The most recent closed billing period; compare it with your bill |
+| Winter water average | Calculated average gallons per December–March bill for the latest completed winter |
 
-Each has `period_start`, `period_end`, `data_through` and `complete`
-attributes. They include every charge the cost model covers, garbage included,
-and update with the statistics every 6 hours, so they trail by a day or two.
+The three bill sensors have `period_start`, `period_end`, `data_through` and
+`complete` attributes. They include every charge the cost model covers, garbage
+included, and update with the statistics every 6 hours, so they trail by a day
+or two.
 
 **Updating rates:** Settings → Devices & services → LUS → Configure.
 1. Pick the date the rates take effect. It defaults to the start of the most

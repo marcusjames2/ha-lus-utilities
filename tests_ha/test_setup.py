@@ -84,7 +84,12 @@ async def test_setup_creates_bill_sensors_and_statistics(
         e.unique_id: e.entity_id
         for e in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
     }
-    assert set(ids) == {f"{ACCOUNT}_current_bill", f"{ACCOUNT}_projected_bill", f"{ACCOUNT}_last_bill"}
+    assert set(ids) == {
+        f"{ACCOUNT}_current_bill",
+        f"{ACCOUNT}_projected_bill",
+        f"{ACCOUNT}_last_bill",
+        f"{ACCOUNT}_winter_water_average",
+    }
 
     current = hass.states.get(ids[f"{ACCOUNT}_current_bill"])
     last = hass.states.get(ids[f"{ACCOUNT}_last_bill"])
@@ -93,6 +98,13 @@ async def test_setup_creates_bill_sensors_and_statistics(
     assert current.attributes["period_start"] == "2026-10-23"
     assert last.attributes["period_start"] == "2026-09-23"
     assert last.attributes["complete"] is True
+
+    winter = hass.states.get(ids[f"{ACCOUNT}_winter_water_average"])
+    assert winter.attributes["unit_of_measurement"] == "gal"
+    assert winter.attributes["friendly_name"] == "LUS Winter water average"
+    assert winter.attributes["winter_year"] == 2026
+    assert winter.attributes["water_meter_id"] == "1000000002"
+    assert float(winter.state) == pytest.approx(30 * (720 + 744 + 744 + 671) / 4)
 
     # Default rates, 9/23-10/23: electric 2 kWh/h and water 30 gal/h for 30 days.
     # The water tier-1 limit is the meter's December-March average: 30 gal for
