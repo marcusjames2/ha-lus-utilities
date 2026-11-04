@@ -106,6 +106,27 @@ def test_to_hourly_accepts_old_incomplete_hours():
     assert hours[1].value == pytest.approx(0.75)
 
 
+def hourly_reads(start: datetime, count: int) -> list[Read]:
+    step = timedelta(hours=1)
+    return [Read(start + i * step, start + (i + 1) * step, 1.0) for i in range(count)]
+
+
+def test_to_hourly_waits_at_a_recent_hour_with_no_reads():
+    reads = hourly_reads(datetime(2026, 10, 26, tzinfo=CDT), 24)
+    del reads[20]  # 20:00 isn't in yet, though 21:00-23:00 are
+    hours = to_hourly(reads, reads_per_hour=1)
+    assert [h.start.hour for h in hours] == list(range(20))
+
+
+def test_to_hourly_leaves_out_an_old_hour_with_no_reads():
+    start = datetime(2026, 10, 20, tzinfo=CDT)
+    reads = hourly_reads(start, 24 * 5)
+    del reads[5]  # days ago
+    hours = to_hourly(reads, reads_per_hour=1)
+    assert len(hours) == 24 * 5 - 1
+    assert hours[5].start == start + timedelta(hours=6)
+
+
 def test_to_hourly_handles_dst_fall_back():
     # 2026-11-01 01:00 happens twice in Central time.
     first = quarter_reads(datetime(2026, 11, 1, 0, tzinfo=CDT), 8)

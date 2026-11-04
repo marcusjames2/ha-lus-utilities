@@ -139,7 +139,7 @@ async def test_upgrade_from_040_moves_summer_months_and_recalculates(
         await hass.async_block_till_done()
 
     assert entry.state is ConfigEntryState.LOADED
-    assert entry.minor_version == 3
+    assert entry.minor_version == 4
     assert entry.options["rate_schedule"][0]["wastewater_summer_months"] == "4,5,6,7,8,9,10,11"
     # The first update recomputed every stored cost and cleared the request.
     assert "recalculate_from" not in entry.options

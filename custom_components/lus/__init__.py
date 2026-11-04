@@ -49,6 +49,10 @@ async def async_migrate_entry(hass: HomeAssistant, entry: LusConfigEntry) -> boo
         hass.config_entries.async_update_entry(
             entry, options=migrate_options_1_3(entry.options), minor_version=3
         )
+    if entry.minor_version < 4:
+        hass.config_entries.async_update_entry(
+            entry, options=migrate_options_1_4(entry.options), minor_version=4
+        )
     return True
 
 
@@ -80,4 +84,11 @@ def migrate_options_1_3(options: Mapping[str, Any]) -> dict[str, Any]:
     """
     if "rate_schedule" in options or "water_tier1_gallons" in options:
         return dict(options)
+    return {**options, CONF_RECALCULATE_FROM: RECALCULATE_ALL.isoformat()}
+
+
+def migrate_options_1_4(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Options for 0.5.1, whose costs cover hours a meter skipped. Stored costs
+    left those hours out, along with the other meters' charges for them in the
+    total, so every stored cost is recomputed."""
     return {**options, CONF_RECALCULATE_FROM: RECALCULATE_ALL.isoformat()}

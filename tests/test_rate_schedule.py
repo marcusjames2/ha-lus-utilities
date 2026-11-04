@@ -10,6 +10,7 @@ from custom_components.lus import (
     coordinator as coord,
     migrate_options_1_2,
     migrate_options_1_3,
+    migrate_options_1_4,
 )
 from custom_components.lus.api import HourlyUsage, Meter, Read
 from custom_components.lus.cost import (
@@ -85,6 +86,11 @@ def test_upgrade_to_the_automatic_limit_recalculates_only_unsaved_rates():
     assert migrate_options_1_3(saved) == saved
     assert migrate_options_1_3({"water_tier1_gallons": 20470}) == {"water_tier1_gallons": 20470}
     assert migrate_options_1_3({}) == {"recalculate_from": "2000-01-01"}
+
+
+def test_upgrade_to_costs_covering_skipped_hours_recalculates_everything():
+    saved = {"rate_schedule": SCHEDULE.as_options()}
+    assert migrate_options_1_4(saved) == {**saved, "recalculate_from": "2000-01-01"}
 
 
 def test_costs_switch_rates_at_the_effective_date():

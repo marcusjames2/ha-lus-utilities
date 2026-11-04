@@ -56,6 +56,7 @@ from .cost import (
     bill_estimates,
     cycle_bounds,
     electricity_costs,
+    fill_gaps,
     garbage_cost,
     water_costs,
     winter_average,
@@ -238,14 +239,17 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
         if not cost_id:
             return None
 
+        cost_hours = fill_gaps(hours)
         if meter.fuel_type == FUEL_WATER:
-            winters, hold_from = await self._async_winter_averages(meter, hours, rates, today)
-            costs = water_costs(hours, rates, winters)
+            winters, hold_from = await self._async_winter_averages(
+                meter, cost_hours, rates, today
+            )
+            costs = water_costs(cost_hours, rates, winters)
             if hold_from is not None:
                 # Store no cost that a winter still coming in could change.
                 costs = [c for c in costs if c.start < hold_from]
         else:
-            costs = cost_fn(hours, rates)
+            costs = cost_fn(cost_hours, rates)
         self._add(
             cost_id,
             cost_last,
@@ -403,7 +407,8 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
 def total_costs(
     costs: list[list[HourlyUsage]], rates: Rates | RateSchedule
 ) -> list[HourlyUsage]:
-    """Sum per-meter costs plus garbage, for hours every meter has reported."""
+    """Sum per-meter costs plus garbage, through the newest hour every meter has
+    reported (each meter's costs cover the hours it skipped; see `fill_gaps`)."""
     by_meter = [{h.start: h.value for h in meter_costs} for meter_costs in costs]
     common = set(by_meter[0]).intersection(*by_meter[1:])
     return [

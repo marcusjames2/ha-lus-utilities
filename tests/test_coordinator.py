@@ -139,6 +139,23 @@ async def test_wastewater_gets_usage_but_no_cost(harness):
     ]
 
 
+async def test_costs_cover_hours_the_meter_skipped(harness):
+    meter = Meter("elec-uuid", "1000000001", "ELECTRICITY", "QUARTER_HOUR", date(2026, 10, 23))
+    reads = quarter_reads(datetime(2026, 10, 23, tzinfo=CDT), 4 * 96)
+    del reads[4 * 5:4 * 8]  # 10/23 05:00-07:59, long enough ago to be given up on
+    c = harness.make(reads)
+    await c._async_import_meter(meter, Rates(), (None, 0.0))
+
+    (_, usage), (_, cost) = harness.added
+    assert len(usage) == 93  # no usage for the skipped hours
+    assert len(cost) == 96  # but they still carry the customer charge
+    skipped = [
+        s["state"] for s in cost
+        if datetime(2026, 10, 23, 5, tzinfo=CDT) <= s["start"] < datetime(2026, 10, 23, 8, tzinfo=CDT)
+    ]
+    assert skipped == pytest.approx([13.00 / (31 * 24)] * 3)
+
+
 def hourly_reads(start: datetime, end: datetime, value: float) -> list[Read]:
     """A read for every real hour from start to end, across DST changes."""
     reads = []
