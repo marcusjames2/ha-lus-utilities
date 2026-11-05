@@ -69,6 +69,9 @@
       "projected_bill": {
         "name": "Projected bill this period"
       },
+      "projected_bill_change": {
+        "name": "Projected change from last bill"
+      },
       "last_bill": {
         "name": "Estimated last bill"
       }

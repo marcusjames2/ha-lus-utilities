@@ -27,7 +27,16 @@ class LusBillDescription(SensorEntityDescription):
     """A bill sensor: which cycle it reads and which figure."""
 
     cycle: Callable[[LusData], BillEstimate]
-    value: Callable[[BillEstimate], float | None]
+    value: Callable[[LusData], float | None]
+
+
+def projected_change(data: LusData) -> float | None:
+    """Return projected current bill minus the last complete bill."""
+    projected = data.current.projected
+    previous = data.previous
+    if projected is None or previous.data_through is None or not previous.complete:
+        return None
+    return projected - previous.cost
 
 
 SENSORS = (
@@ -35,19 +44,25 @@ SENSORS = (
         key="current_bill",
         translation_key="current_bill",
         cycle=lambda data: data.current,
-        value=lambda bill: bill.cost,
+        value=lambda data: data.current.cost,
     ),
     LusBillDescription(
         key="projected_bill",
         translation_key="projected_bill",
         cycle=lambda data: data.current,
-        value=lambda bill: bill.projected,
+        value=lambda data: data.current.projected,
+    ),
+    LusBillDescription(
+        key="projected_bill_change",
+        translation_key="projected_bill_change",
+        cycle=lambda data: data.current,
+        value=projected_change,
     ),
     LusBillDescription(
         key="last_bill",
         translation_key="last_bill",
         cycle=lambda data: data.previous,
-        value=lambda bill: bill.cost,
+        value=lambda data: data.previous.cost,
     ),
 )
 
@@ -96,10 +111,10 @@ class LusBillSensor(CoordinatorEntity[LusCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        bill = self._bill()
-        if bill is None:
+        data = self.coordinator.data
+        if data is None:
             return None
-        value = self.entity_description.value(bill)
+        value = self.entity_description.value(data)
         return round(value, 2) if value is not None else None
 
     @property

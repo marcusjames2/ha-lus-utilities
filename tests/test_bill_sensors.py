@@ -7,8 +7,8 @@ import pytest
 
 from custom_components.lus import coordinator as coord
 from custom_components.lus.api import HourlyUsage, Meter
-from custom_components.lus.cost import SITE_TZ, Rates, bill_estimates
-from custom_components.lus.sensor import SENSORS, LusBillSensor
+from custom_components.lus.cost import SITE_TZ, BillEstimate, Rates, bill_estimates
+from custom_components.lus.sensor import SENSORS, LusBillSensor, projected_change
 
 CDT = timezone(timedelta(hours=-5))
 
@@ -27,6 +27,48 @@ HOURS = hourly(local(2026, 9, 23), local(2026, 10, 23), 0.5) + hourly(
     local(2026, 10, 23), local(2026, 10, 30), 1.0
 )
 NOW = local(2026, 10, 31, 9)
+
+
+def change_data(projected: float | None, previous: float = 100.0, *, complete: bool = True):
+    """Build bill data for projected-change unit tests without portal or HA setup."""
+    current_start, current_end = local(2026, 10, 23), local(2026, 11, 23)
+    previous_start = local(2026, 9, 23)
+    current = BillEstimate(
+        current_start,
+        current_end,
+        0.0 if projected is None else projected / 31,
+        None if projected is None else current_start + timedelta(days=1),
+    )
+    previous_bill = BillEstimate(
+        previous_start,
+        current_start,
+        previous,
+        current_start if complete else current_start - timedelta(hours=1),
+    )
+    return coord.LusData("5000000000", current, previous_bill)
+
+
+def test_projected_change_higher():
+    assert projected_change(change_data(125.25)) == pytest.approx(25.25)
+
+
+def test_projected_change_lower():
+    assert projected_change(change_data(75.5)) == pytest.approx(-24.5)
+
+
+def test_projected_change_equal():
+    assert projected_change(change_data(100.0)) == pytest.approx(0.0)
+
+
+def test_projected_change_unavailable_without_projection_or_previous_data():
+    assert projected_change(change_data(None)) is None
+    data = change_data(125.0)
+    previous = BillEstimate(data.previous.cycle_start, data.previous.cycle_end, 0.0, None)
+    assert projected_change(coord.LusData(data.account_id, data.current, previous)) is None
+
+
+def test_projected_change_unavailable_with_incomplete_previous_cycle():
+    assert projected_change(change_data(125.0, complete=False)) is None
 
 
 def test_current_and_previous_cycles():
@@ -76,6 +118,10 @@ def test_sensors_report_rounded_dollars_and_period():
         "complete": False,
     }
     assert make_sensor("projected_bill", data).native_value == 744.0
+    change = make_sensor("projected_bill_change", data)
+    assert change.native_value == 384.0
+    assert change.unique_id == "5000000000_projected_bill_change"
+    assert make_sensor("projected_bill_change", change_data(125.556)).native_value == 25.56
     last = make_sensor("last_bill", data)
     assert last.native_value == 360.0
     assert last.extra_state_attributes["complete"] is True
