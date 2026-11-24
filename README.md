@@ -6,6 +6,12 @@ into Home Assistant long-term statistics, for use in the Energy dashboard.
 The built-in Opower integration doesn't list LUS: LUS runs Opower's DSS portal,
 which has its own login and API path. This integration talks to it directly.
 
+**Quick start:** [Install](#install) it, then follow
+[Set up the Utility bill dashboard](#set-up-the-utility-bill-dashboard): a
+five-minute, click-by-click guide with screenshots that ends with one page
+showing your usage graphs, this bill's forecast and your spending. A
+[TL;DR](#tldr) with the paste-ready dashboard is at the end of that section.
+
 > **Disclaimer:** This is an unofficial, independent project. It is not
 > affiliated with, endorsed by, or supported by Lafayette Utilities System
 > (LUS), the Lafayette Utilities Authority, or Opower/Oracle. The LUS name
@@ -112,6 +118,75 @@ unknown until the current period has data and the previous period is complete.
 Because the LUS portal typically lags by a day or two, projections and their
 change trail current usage by the same amount.
 
+## Spending insights
+
+Nine more sensors on the **LUS** device answer what a bill doesn't. They are
+worked out from the usage history and your bill rates on every update, and
+[docs/MATH.md](docs/MATH.md) gives the formula and a worked example for each.
+
+| Sensor | Value | Attributes |
+|---|---|---|
+| Cost this month | Calendar month so far | `electricity`, `water`, `wastewater`, `garbage`, `fixed`, `variable`, `kwh`, `gallons`, plus `months` (the last 13) and `billing_periods` (the last 13 bills) |
+| Cost this year | Calendar year so far | The same breakdown, plus `years` |
+| Electricity cost per kWh | All-in $/kWh on the last complete bill, customer charge included | `usage_only_rate` (what one more kWh costs), `fixed_share` |
+| Water and wastewater cost per gallon | All-in $/gal on the last complete bill | `per_1000_gallons`, `water_only_rate`, `usage_only_rate` |
+| Cost change from the month before | % change, last complete month against the one before | Each utility, `kwh`, `gallons`, `per_day`, `drivers` (how much came from usage, rates and fixed charges), `month_to_date` |
+| Cost change from a year ago | % change, last complete month against the same month last year | The same, plus `year_to_date` |
+| Forecast bill this period | Expected bill for the current billing period | `low`, `high`, each utility, `kwh`, `gallons`, `factors` |
+| Forecast next bill | Expected bill for the period after | The same, with `method` `seasonal` or `trend` |
+| Unusual usage days | Days in the last 30 with a spike or a likely leak | `latest_explanation`, `latest_cause`, `excess_cost`, `anomalies` |
+
+- **Forecast or projected?** *Projected bill this period* scales the cost so
+  far to the whole period. *Forecast bill this period* fills the rest of the
+  period with your recent daily usage, adjusted for how the season moved over
+  the same days last year, and prices the whole period as one bill. That puts
+  tier 2 water and the summer wastewater discount where they will be billed,
+  so prefer it; the projected sensor is kept for existing dashboards.
+- **Comparisons need history.** Month over month needs two complete months;
+  year over year needs the same month a year earlier. Until then those sensors
+  are unknown. Three years of usage are kept for this.
+- **Unusual days** compares each day with the four weeks before it and names a
+  likely cause from when the extra was used: a few heavy hours, a raised
+  overnight level, a hot afternoon, an irrigation run. Water flowing in every
+  hour for 24 hours is reported as a likely leak however small. Causes are
+  read from the usage pattern only; there is no weather data behind them.
+- The first update after a restart reads the stored usage statistics once;
+  after that the history is kept in memory.
+
+A Markdown card for the month by utility:
+
+```yaml
+type: markdown
+content: >
+  {% set s = 'sensor.lus_cost_this_month' %}
+  | Utility | This month |
+
+  |---|---:|
+
+  | Electricity | ${{ state_attr(s, 'electricity') }} |
+
+  | Water | ${{ state_attr(s, 'water') }} |
+
+  | Wastewater | ${{ state_attr(s, 'wastewater') }} |
+
+  | Garbage | ${{ state_attr(s, 'garbage') }} |
+
+  | **Total** | **${{ states(s) }}** |
+```
+
+And an automation trigger for a new unusual day:
+
+```yaml
+trigger:
+  - platform: state
+    entity_id: sensor.lus_unusual_usage_days
+    attribute: latest_date
+action:
+  - service: notify.notify
+    data:
+      message: "{{ state_attr('sensor.lus_unusual_usage_days', 'latest_explanation') }}"
+```
+
 **Updating rates:** Settings → Devices & services → LUS → Configure.
 1. Pick the date the rates take effect. It defaults to the start of the most
    recently closed billing cycle, which is the period on the bill you just
@@ -158,10 +233,194 @@ that figure instead.
 2. Restart Home Assistant.
 3. Settings → Devices & services → Add integration → **LUS (Lafayette Utilities System)**.
 4. Enter your portal username and password.
-5. Settings → Dashboards → Energy: add `LUS electricity …` under Electricity grid
-   consumption and `LUS water …` under Water consumption.
+5. Follow [Set up the Utility bill dashboard](#set-up-the-utility-bill-dashboard)
+   to add the meters to the Energy dashboard and get one page with the
+   graphs, the bill forecast and the spending sensors.
 
 Requires Home Assistant 2026.1 or newer.
+
+## Set up the Utility bill dashboard
+
+After [Install](#install), two things put everything on one page: the
+Energy dashboard needs to know about the LUS meters, and a **Utility bill**
+dashboard shows the Energy graphs with all the bill and spending sensors
+under them. It takes about five minutes and needs no files on the server.
+The screenshots come from a test install with made-up meters and usage.
+
+![The finished Utility bill dashboard](docs/images/utility-bill-dashboard.png)
+
+### Part A: connect the meters to the Energy dashboard
+
+Do this once. The Utility bill dashboard reads its graphs from here.
+
+1. Click **Energy** in the sidebar, then the **pencil** at the top right.
+   That opens the Energy configuration page (its address ends in
+   `/config/energy`, so you can also type that after your Home Assistant
+   address). If Energy has never been set up, Home Assistant may show a
+   setup wizard instead; its Electricity grid and Water steps ask the same
+   questions as below.
+2. Under **Electricity grid → Grid consumption**, click **Add consumption**.
+3. In **Consumed energy**, pick **`LUS electricity 1000000001`** (your meter
+   number instead of `1000000001`). The picker may show it as
+   `lus:1000000001_electricity_consumption`.
+4. Choose **Use an entity tracking the total costs**, then pick
+   **`LUS electricity cost 1000000001`**
+   (`lus:1000000001_electricity_cost`). Click **Save**.
+
+   <img src="docs/images/energy-electricity.png" alt="Configure grid consumption with the LUS electricity meter and its cost" width="700">
+
+5. Scroll down to **Water consumption** and click **Add water source**.
+6. In **Water usage**, pick **`LUS water 1000000002`**
+   (`lus:1000000002_water_consumption`).
+7. Choose **Use an entity tracking the total costs**, then pick
+   **`LUS water cost 1000000002`** (`lus:1000000002_water_cost`). Click
+   **Save**.
+
+   <img src="docs/images/energy-water.png" alt="Configure water consumption with the LUS water meter and its cost" width="700">
+
+Don't add the **wastewater** meter as a water source: its gallons are the
+same water, so every gallon would count twice. Its cost is already in the
+water cost.
+
+### Part B: add the Utility bill dashboard
+
+1. Go to **Settings → Dashboards** and click **+ Add dashboard** at the bottom
+   right.
+2. Pick **New dashboard from scratch**.
+
+   <img src="docs/images/dashboard-new.png" alt="The Add dashboard dialog with New dashboard from scratch" width="700">
+
+3. Type **`Utility bill`** as the **Title**, leave **Add to sidebar** on and
+   click **Create**.
+
+   <img src="docs/images/dashboard-title.png" alt="Add new dashboard with the title Utility bill" width="700">
+
+4. Click **Utility bill** in the sidebar. The new dashboard is empty.
+5. Click the **pencil** at the top right to edit it.
+6. Click the **⋮** menu at the top right and pick **Raw configuration
+   editor**.
+
+   <img src="docs/images/dashboard-raw-editor.png" alt="The three-dot menu with Raw configuration editor" width="700">
+
+7. Click inside the editor, press **Ctrl+A** (**⌘A** on a Mac) to select
+   everything, and paste the whole block from
+   [`dashboards/utility-bill.yaml`](dashboards/utility-bill.yaml). It's also
+   in the [TL;DR](#tldr) below; GitHub's copy button at the top right of the
+   block copies all of it.
+
+   <img src="docs/images/dashboard-paste.png" alt="The raw configuration editor with the dashboard pasted in" width="700">
+
+8. Click **Save**, then the **X** at the top left, then **Done**.
+
+That's it. The top half is the Energy dashboard (pick a day, week or month
+with the arrows), and the two cards underneath hold the bill and spending
+sensors described in [Estimated cost](#estimated-cost) and
+[Spending insights](#spending-insights).
+
+### If something looks wrong
+
+- **A card says "Entity not available"**: your sensors have different IDs.
+  Go to **Settings → Devices & services → LUS → (your device)** and click a
+  sensor, then the gear, to see its **Entity ID**. Some older installs use
+  `sensor.lus_utilities_…` instead of `sensor.lus_…`. Open the raw configuration editor again, and use
+  **Ctrl+F** to find `sensor.lus_` and replace it with your prefix.
+- **The graphs are empty for today**: the LUS portal is usually a day or two
+  behind. Press **‹** next to the date once or twice.
+- **Sources table or graphs are empty for every day**: Part A isn't done yet,
+  or the statistics haven't been imported. The first import can take a few
+  minutes after the integration is added.
+- **Save asks about comments**: you pasted something other than the block
+  below. The raw editor drops YAML comments, so the block has none.
+
+### TL;DR
+
+| Where | Click / type |
+|---|---|
+| Sidebar → **Energy** → **pencil** (top right) → **Electricity grid** | **Add consumption** → `LUS electricity <meter>` → **Use an entity tracking the total costs** → `LUS electricity cost <meter>` → **Save** |
+| Same page, **Water consumption** | **Add water source** → `LUS water <meter>` → **Use an entity tracking the total costs** → `LUS water cost <meter>` → **Save**. Skip wastewater. |
+| Settings → Dashboards | **+ Add dashboard** → **New dashboard from scratch** → Title `Utility bill` → **Create** |
+| Sidebar → **Utility bill** | **pencil** → **⋮** → **Raw configuration editor** → **Ctrl+A** → paste the block below → **Save** → **X** → **Done** |
+
+Paste this whole block (also in
+[`dashboards/utility-bill.yaml`](dashboards/utility-bill.yaml)):
+
+```yaml
+views:
+  - title: Utility bill
+    path: bill
+    icon: mdi:cash-multiple
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        column_span: 2
+        cards:
+          - type: energy-date-selection
+            grid_options:
+              columns: full
+          - type: energy-distribution
+            title: Energy distribution
+            grid_options:
+              columns: full
+          - type: energy-sources-table
+            title: Sources
+            grid_options:
+              columns: full
+      - type: grid
+        cards:
+          - type: energy-usage-graph
+            title: Electricity usage
+            grid_options:
+              rows: 5
+      - type: grid
+        cards:
+          - type: energy-water-graph
+            title: Water consumption
+            grid_options:
+              rows: 5
+      - type: grid
+        cards:
+          - type: entities
+            title: This bill
+            grid_options:
+              rows: 8
+            entities:
+              - entity: sensor.lus_forecast_bill_this_period
+                name: Forecast this bill
+              - entity: sensor.lus_projected_bill_this_period
+                name: Projected this bill
+              - entity: sensor.lus_estimated_bill_this_period
+                name: So far this bill
+              - entity: sensor.lus_forecast_next_bill
+                name: Forecast next bill
+              - entity: sensor.lus_estimated_last_bill
+                name: Last bill (estimated)
+              - entity: sensor.lus_projected_change_from_last_bill
+                name: Change vs last bill
+      - type: grid
+        cards:
+          - type: entities
+            title: Spending
+            grid_options:
+              rows: 8
+            entities:
+              - entity: sensor.lus_cost_this_month
+                name: This month
+              - entity: sensor.lus_cost_this_year
+                name: This year
+              - entity: sensor.lus_cost_change_from_a_year_ago
+                name: Change vs a year ago
+              - entity: sensor.lus_cost_change_from_the_month_before
+                name: Change vs last month
+              - entity: sensor.lus_electricity_cost_per_kwh
+                name: Electricity per kWh
+              - entity: sensor.lus_water_and_wastewater_cost_per_gallon
+                name: Water and sewer per gallon
+              - entity: sensor.lus_unusual_usage_days
+                name: Unusual usage days
+              - entity: sensor.lus_winter_water_average
+                name: Winter water average
+```
 
 ## Check your login outside Home Assistant
 
@@ -173,12 +432,50 @@ python3 -m venv .venv && .venv/bin/pip install aiohttp
 It prompts for the username and password (or reads `LUS_USERNAME` /
 `LUS_PASSWORD`), logs in, and prints a summary of the last 3 days per meter.
 
+Prefer the prompt: a password in an environment variable tends to end up in
+shell history or a `.env` file.
+
+## Your credentials
+
+- Home Assistant stores the portal username and password in the config entry
+  (`config/.storage/core.config_entries`), unencrypted, as it does for every
+  integration that signs in with a password. Anyone who can read that file or
+  a backup of it can read them, so protect backups and use a password that is
+  unique to the portal. The portal offers no token or app password to store
+  instead.
+- They are sent only to `dss-lus.opower.com`, over HTTPS, and are never written
+  to the log. The session token is kept in memory only.
+- **Download diagnostics** on the integration's page leaves out the username,
+  password and account number, so it is safe to attach to a bug report.
+- Statistic ids and names contain your utility account numbers. Crop them out
+  of screenshots you share.
+
 ## Development
 
 ```bash
 .venv/bin/pip install homeassistant pytest pytest-asyncio
 .venv/bin/python -m pytest
 ```
+
+`tests/` needs no running Home Assistant. `tests_ha/` loads the integration
+into a real one against a fake portal:
+
+```bash
+python3 -m venv .venv-ha && .venv-ha/bin/pip install -r requirements_test.txt
+.venv-ha/bin/python -m pytest tests_ha
+```
+
+| Module | What it does |
+|---|---|
+| `api.py` | Signs in to the portal, lists meters, fetches reads, sums them to hours |
+| `cost.py` | The bill model: rates over time, billing cycles, cost per hour |
+| `analytics.py` | Spending insights: breakdowns, effective rates, comparisons, forecasts, unusual days |
+| `coordinator.py` | Every 6 hours: fetch, write statistics, work out bills and insights |
+| `sensor.py` | The bill and insight sensors |
+| `config_flow.py` | Sign-in, re-authentication, and the bill rates form |
+| `diagnostics.py` | Redacted diagnostics download |
+
+`api.py`, `cost.py` and `analytics.py` import nothing from Home Assistant.
 
 ## How the portal API works
 
@@ -198,3 +495,6 @@ All calls go to `https://dss-lus.opower.com/webcenter/edge/apis/`.
      returns reads; both dates are inclusive.
 
 A 401 means the session expired; the client logs in again once and retries.
+A 400 or 403 at login counts as rejected credentials only when it comes with
+the portal's JSON error; without one it is treated as the portal being
+unavailable, so an outage page doesn't ask you to sign in again.

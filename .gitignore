@@ -2,3 +2,11 @@
 __pycache__/
 .pytest_cache/
 pip.log
+# Anything that could hold portal credentials or account details
+.env
+.env.*
+secrets.yaml
+.storage/
+*.log
+*.db
+*.db-*

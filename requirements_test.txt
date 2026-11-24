@@ -1,0 +1,6 @@
+# Unit tests (tests/) need only these.
+pytest
+pytest-asyncio
+# tests_ha/ runs the integration inside Home Assistant. This plugin installs
+# the Home Assistant release it is built for, so use a fresh virtualenv.
+pytest-homeassistant-custom-component

@@ -94,12 +94,17 @@ async def test_setup_creates_bill_sensors_and_statistics(
         e.unique_id: e.entity_id
         for e in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
     }
+    insight_sensors = {
+        "month_cost", "year_cost", "electricity_rate", "water_rate", "cost_change_month",
+        "cost_change_year", "forecast_bill", "forecast_next_bill", "usage_anomalies",
+    }
     assert set(ids) == {
         f"{ACCOUNT}_current_bill",
         f"{ACCOUNT}_projected_bill",
         f"{ACCOUNT}_projected_bill_change",
         f"{ACCOUNT}_last_bill",
         f"{ACCOUNT}_winter_water_average",
+        *(f"{ACCOUNT}_{key}" for key in insight_sensors),
     }
 
     current = hass.states.get(ids[f"{ACCOUNT}_current_bill"])
@@ -144,6 +149,33 @@ async def test_setup_creates_bill_sensors_and_statistics(
         float(projected.state) - float(last.state), abs=0.01
     )
 
+    # Spending insights, from the same usage, rates and bill periods
+    def state(key: str):
+        return hass.states.get(ids[f"{ACCOUNT}_{key}"])
+
+    month = state("month_cost")
+    assert month.attributes["friendly_name"] == "LUS Cost this month"
+    assert month.attributes["unit_of_measurement"] == "USD"
+    assert month.attributes["period"] == "2026-10"
+    assert float(month.state) == pytest.approx(
+        sum(month.attributes[u] for u in ("electricity", "water", "wastewater", "garbage")),
+        abs=0.02,
+    )
+    # The last closed bill, 9/24-10/24, by the bills' own dates.
+    assert month.attributes["billing_periods"][-2]["period"] == "2026-10-24"
+    assert month.attributes["billing_periods"][-2]["total"] == pytest.approx(expected, abs=0.01)
+    rate = state("electricity_rate")
+    assert rate.attributes["unit_of_measurement"] == "USD/kWh"
+    assert float(rate.state) == pytest.approx((kwh * 0.09624 + 13.00) / kwh, abs=1e-5)
+    assert state("water_rate").attributes["unit_of_measurement"] == "USD/gal"
+    forecast = state("forecast_bill")
+    assert forecast.attributes["period_end"] == "2026-11-24"
+    assert float(forecast.state) > float(current.state)
+    # Electricity has a month of history: too little to compare with a year ago.
+    assert state("cost_change_year").state == "unknown"
+    # 30 gal every hour of every day is what a leak looks like.
+    assert state("usage_anomalies").attributes["latest_cause"] == "continuous_flow"
+
     await async_wait_recording_done(hass)
     stats = await recorder_mock.async_add_executor_job(
         statistics_during_period,
@@ -179,3 +211,58 @@ async def test_upgrade_from_040_moves_summer_months_and_recalculates(
     assert entry.options["rate_schedule"][0]["wastewater_summer_months"] == "4,5,6,7,8,9,10,11"
     # The first update recomputed every stored cost and cleared the request.
     assert "recalculate_from" not in entry.options
+
+
+async def test_history_is_read_back_from_statistics_after_a_restart(
+    recorder_mock: Recorder, hass: HomeAssistant, entry: MockConfigEntry, freezer: FrozenDateTimeFactory
+) -> None:
+    freezer.move_to("2026-10-31T14:00:00+00:00")
+    hass.config.currency = "USD"
+    with patch("custom_components.lus.coordinator.LusClient", FakeClient):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        await async_wait_recording_done(hass)
+        first = entry.runtime_data.data.insights
+
+        # Three weeks on, a fresh coordinator only refetches from the previous
+        # billing cycle; September has to come from the stored statistics.
+        freezer.move_to("2026-11-25T14:00:00+00:00")
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+    again = entry.runtime_data.data.insights
+
+    def month(insights, label):
+        return next(m for m in insights.months if m.label == label)
+
+    # Water has a year of history; nothing before the refetched cycles was
+    # read from the portal again, so it can only have come from statistics.
+    assert again.months[0].label == first.months[0].label == "2025-09"
+    for label in ("2026-01", "2026-06"):
+        assert month(again, label).gallons == pytest.approx(month(first, label).gallons)
+    assert month(again, "2026-01").gallons == pytest.approx(30.0 * 24 * 31)
+    assert month(again, "2026-10").kwh == pytest.approx(month(first, "2026-10").kwh)
+
+
+async def test_failed_sign_in_does_not_put_the_password_back_in_the_form(
+    recorder_mock: Recorder, hass: HomeAssistant
+) -> None:
+    from homeassistant.config_entries import SOURCE_USER
+
+    from custom_components.lus.api import LusAuthError
+
+    class Rejecting(FakeClient):
+        async def async_login(self) -> None:
+            raise LusAuthError("Login rejected")
+
+    with patch("custom_components.lus.config_flow.LusClient", Rejecting):
+        result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"username": "someone", "password": "hunter2"}
+        )
+
+    assert result["errors"] == {"base": "invalid_auth"}
+    suggested = {
+        str(key): (key.description or {}).get("suggested_value")
+        for key in result["data_schema"].schema
+    }
+    assert suggested == {"username": "someone", "password": None}

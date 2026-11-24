@@ -17,6 +17,10 @@ import aiohttp
 BASE_URL = "https://dss-lus.opower.com/webcenter/edge/apis"
 CLIENT_CODE = "lus"
 
+# Longest a single portal request may take. aiohttp's own default is five
+# minutes, which would let one stalled call hold up a whole update.
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=60)
+
 # Fuel types reported by DataBrowser metadata.
 FUEL_ELECTRICITY = "ELECTRICITY"
 FUEL_WATER = "WATER"
@@ -97,29 +101,41 @@ class LusClient:
                 "rememberMe": "true",
             },
             headers={"X-Requested-With": "XMLHttpRequest"},
+            timeout=REQUEST_TIMEOUT,
         ) as resp:
             body = await _json(resp)
-            if resp.status in (400, 401, 403):
-                code = (body.get("error") or {}).get("serviceErrorCode")
-                raise LusAuthError(f"Login rejected ({resp.status} {code})")
-            if resp.status != 200:
-                raise LusError(f"Login failed with HTTP {resp.status}")
+            status = resp.status
+        # The portal answers a rejected login with a JSON error. A 400 or 403
+        # without one is a block or an outage page, not a wrong password, and
+        # must not send the user off to re-enter credentials that are fine.
+        if status == 401 or (status in (400, 403) and body is not None):
+            code = _error(body).get("serviceErrorCode")
+            raise LusAuthError(f"Login rejected ({status} {code})")
+        if status != 200:
+            raise LusError(f"Login failed with HTTP {status}")
+        if body is None:
+            raise LusError("Login returned something other than JSON")
         token = body.get("sessionToken")
         if not token:
             raise LusAuthError("Login response had no session token")
         self._token = token
 
+        # These two must not log in again on a 401: that is this method, and
+        # the two would call each other, password and all, without end.
         account = await self._get(
-            "customer-preferences-v1/cws/v1/accounts/primary", entities=False
+            "customer-preferences-v1/cws/v1/accounts/primary",
+            entities=False,
+            retry=False,
         )
-        self._account_id = str(account["id"])
+        self._account_id = str(_field(account, "id"))
         customer = await self._get(
             f"multi-account-v1/cws/{CLIENT_CODE}/customers/current",
             params={"X-DS-4930-uom-enable": "true"},
             entities=False,
             account_only=True,
+            retry=False,
         )
-        self._customer_uuid = customer["uuid"]
+        self._customer_uuid = _field(customer, "uuid")
 
     @property
     def account_id(self) -> str | None:
@@ -195,7 +211,10 @@ class LusClient:
             headers["Opower-Selected-Entities"] = json.dumps(selected)
 
         async with self._session.get(
-            f"{BASE_URL}/{path}", params=params, headers=headers
+            f"{BASE_URL}/{path}",
+            params=params,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
         ) as resp:
             body = await _json(resp, strict=strict_json and resp.status == 200)
             status = resp.status
@@ -211,40 +230,69 @@ class LusClient:
                 strict_json=strict_json,
             )
         if status == 401:
-            raise LusAuthError("Session rejected after re-login")
+            raise LusAuthError("Session rejected right after logging in")
+        # Meter ids are part of the reads path; keep them out of error text,
+        # which ends up in the log and in bug reports.
+        endpoint = path.split("/utilityAccounts/")[0]
         if status != 200:
-            detail = (body.get("error") or body).get("details")
-            raise LusError(f"GET {path} returned HTTP {status}: {detail}")
+            detail = str(_error(body).get("details") or "")[:200]
+            raise LusError(f"GET {endpoint} returned HTTP {status}: {detail}")
+        if body is None:
+            # Taking a maintenance page for an empty answer would leave a hole
+            # in the history that later imports never go back to fill.
+            raise LusError(f"GET {endpoint} returned something other than JSON")
         return body
 
 
 async def _json(resp: aiohttp.ClientResponse, *, strict: bool = False) -> Any:
+    """The response's JSON: any JSON value when `strict`, which raises if the
+    body isn't JSON at all; otherwise the JSON object, or None if it isn't one."""
     try:
         body = await resp.json(content_type=None)
     except (aiohttp.ContentTypeError, ValueError):
         if strict:
             raise LusError("Malformed reads response: body was not valid JSON") from None
-        return {}
-    return body if strict or isinstance(body, dict) else {}
+        return None
+    return body if strict or isinstance(body, dict) else None
+
+
+def _error(body: Any) -> dict[str, Any]:
+    """The error object of a response, whatever shape the portal gave it."""
+    body = body if isinstance(body, dict) else {}
+    error = body.get("error")
+    if isinstance(error, dict):
+        return error
+    return {"details": error if error is not None else body.get("details")}
+
+
+def _field(body: dict[str, Any], key: str) -> Any:
+    """A field the portal always sends; without it the response is unusable."""
+    value = body.get(key)
+    if value is None:
+        raise LusError(f"Portal response had no {key}")
+    return value
 
 
 def parse_meters(meta: dict[str, Any]) -> list[Meter]:
     """Build meters from a DataBrowser metadata response."""
     meters = []
-    for fuel_type, points in (meta.get("fuelTypeServicePoint") or {}).items():
-        for point in points:
-            if not point.get("hasAmiUsage"):
-                continue
-            first = point.get("dateOfFirstAmiRead")
-            meters.append(
-                Meter(
-                    uuid=point["accountUuid"],
-                    utility_account_id=str(point["preferredUtilityAccountId"]),
-                    fuel_type=fuel_type,
-                    read_resolution=point.get("readResolution") or "HOUR",
-                    first_read=date.fromisoformat(first) if first else None,
+    try:
+        for fuel_type, points in (meta.get("fuelTypeServicePoint") or {}).items():
+            for point in points:
+                if not point.get("hasAmiUsage"):
+                    continue
+                first = point.get("dateOfFirstAmiRead")
+                meters.append(
+                    Meter(
+                        uuid=point["accountUuid"],
+                        utility_account_id=str(point["preferredUtilityAccountId"]),
+                        fuel_type=fuel_type,
+                        read_resolution=point.get("readResolution") or "HOUR",
+                        first_read=date.fromisoformat(first) if first else None,
+                    )
                 )
-            )
+    except (AttributeError, KeyError, TypeError, ValueError) as err:
+        raise LusError("Portal meter list was not in the expected form") from err
     return meters
 
 

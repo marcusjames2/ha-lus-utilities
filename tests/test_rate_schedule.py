@@ -497,3 +497,72 @@ async def test_flow_keeps_the_earliest_pending_recalculation():
     defaults = {k.schema: k.default() for k in form["data_schema"].schema}
     result = await flow.async_step_rates(defaults)
     assert result["data"]["recalculate_from"] == "2026-08-23"
+
+
+async def test_recalculation_after_a_long_gap_continues_the_running_sum(harness):
+    # Cost is stored up to 9/1, then nothing for seven weeks; rates are then
+    # saved from 10/23. The sum must carry on from 9/1, not restart at zero.
+    reads = quarter_reads(datetime(2026, 10, 20, tzinfo=CDT), 4 * 24 * 6)
+    newest = datetime(2026, 10, 25, 23, tzinfo=CDT).timestamp()
+    harness.last[CONSUMPTION_ID] = [{"start": newest, "sum": 1000.0}]
+    harness.last[COST_ID] = [{"start": newest, "sum": 99.0}]
+    old = datetime(2026, 9, 1, 23, tzinfo=CDT)
+    harness.history[COST_ID] = [{"start": old.timestamp(), "sum": 40.0}]
+
+    c = harness.make(reads)
+    recalc = local(2026, 10, 23)
+    await c._async_import_meter(METER, SCHEDULE, (None, 0.0), recalc)
+
+    # The weeks before the date were empty, so it looked further back.
+    assert [q[0] for q in harness.queries] == [COST_ID, COST_ID]
+    assert harness.queries[1][2] == recalc - coord.RECALCULATE_LOOKBACK
+    cost = harness.added[-1][1]
+    assert cost[0]["start"] == datetime(2026, 10, 20, tzinfo=CDT)
+    assert cost[0]["sum"] == pytest.approx(40.0 + cost[0]["state"])
+
+
+class NoMeters:
+    """A portal client with nothing to import; `on_meters` runs mid-update."""
+
+    account_id = "5000000000"
+
+    def __init__(self, on_meters=lambda: None) -> None:
+        self._on_meters = on_meters
+
+    async def async_login(self) -> None:
+        pass
+
+    async def async_get_meters(self):
+        self._on_meters()
+        return []
+
+
+def updating(harness, options: dict, on_meters=lambda: None):
+    saved = []
+    c = harness.make([])
+    c.client = NoMeters(on_meters)
+    c.config_entry = SimpleNamespace(options=options)
+    c.hass.config_entries = SimpleNamespace(
+        async_update_entry=lambda entry, options: saved.append(options)
+    )
+    return c, saved
+
+
+async def test_finished_recalculation_clears_its_request(harness):
+    options = {"rate_schedule": SCHEDULE.as_options(), "recalculate_from": "2026-10-23"}
+    c, saved = updating(harness, options)
+    await c._async_update_data()
+    assert saved == [{"rate_schedule": SCHEDULE.as_options()}]
+
+
+async def test_rates_saved_during_a_recalculation_are_kept(harness):
+    options = {"rate_schedule": SCHEDULE.as_options(), "recalculate_from": "2026-10-23"}
+    newer = {"rate_schedule": [], "recalculate_from": "2026-08-23"}
+
+    def save_new_rates():
+        c.config_entry.options = newer
+
+    c, saved = updating(harness, options, save_new_rates)
+    await c._async_update_data()
+    # Nothing is written back: the newer rates and their request stand.
+    assert saved == [] and c.config_entry.options is newer

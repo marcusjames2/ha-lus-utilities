@@ -1,0 +1,75 @@
+views:
+  - title: Utility bill
+    path: bill
+    icon: mdi:cash-multiple
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        column_span: 2
+        cards:
+          - type: energy-date-selection
+            grid_options:
+              columns: full
+          - type: energy-distribution
+            title: Energy distribution
+            grid_options:
+              columns: full
+          - type: energy-sources-table
+            title: Sources
+            grid_options:
+              columns: full
+      - type: grid
+        cards:
+          - type: energy-usage-graph
+            title: Electricity usage
+            grid_options:
+              rows: 5
+      - type: grid
+        cards:
+          - type: energy-water-graph
+            title: Water consumption
+            grid_options:
+              rows: 5
+      - type: grid
+        cards:
+          - type: entities
+            title: This bill
+            grid_options:
+              rows: 8
+            entities:
+              - entity: sensor.lus_forecast_bill_this_period
+                name: Forecast this bill
+              - entity: sensor.lus_projected_bill_this_period
+                name: Projected this bill
+              - entity: sensor.lus_estimated_bill_this_period
+                name: So far this bill
+              - entity: sensor.lus_forecast_next_bill
+                name: Forecast next bill
+              - entity: sensor.lus_estimated_last_bill
+                name: Last bill (estimated)
+              - entity: sensor.lus_projected_change_from_last_bill
+                name: Change vs last bill
+      - type: grid
+        cards:
+          - type: entities
+            title: Spending
+            grid_options:
+              rows: 8
+            entities:
+              - entity: sensor.lus_cost_this_month
+                name: This month
+              - entity: sensor.lus_cost_this_year
+                name: This year
+              - entity: sensor.lus_cost_change_from_a_year_ago
+                name: Change vs a year ago
+              - entity: sensor.lus_cost_change_from_the_month_before
+                name: Change vs last month
+              - entity: sensor.lus_electricity_cost_per_kwh
+                name: Electricity per kWh
+              - entity: sensor.lus_water_and_wastewater_cost_per_gallon
+                name: Water and sewer per gallon
+              - entity: sensor.lus_unusual_usage_days
+                name: Unusual usage days
+              - entity: sensor.lus_winter_water_average
+                name: Winter water average

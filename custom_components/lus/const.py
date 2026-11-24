@@ -16,6 +16,10 @@ CHUNK_DAYS = 30
 # the next update, set when rates are saved; cleared once done.
 CONF_RECALCULATE_FROM = "recalculate_from"
 
+# How much usage history the spending insights keep: enough to compare a
+# month with the same month a year earlier and a year with the one before.
+INSIGHTS_HISTORY = timedelta(days=3 * 366)
+
 # How far before the recalculation date to look for the stored running sum.
 RECALCULATE_LOOKBACK = timedelta(days=31)
 

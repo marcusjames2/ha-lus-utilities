@@ -77,6 +77,33 @@
       },
       "winter_water_average": {
         "name": "Winter water average"
+      },
+      "month_cost": {
+        "name": "Cost this month"
+      },
+      "year_cost": {
+        "name": "Cost this year"
+      },
+      "electricity_rate": {
+        "name": "Electricity cost per kWh"
+      },
+      "water_rate": {
+        "name": "Water and wastewater cost per gallon"
+      },
+      "cost_change_month": {
+        "name": "Cost change from the month before"
+      },
+      "cost_change_year": {
+        "name": "Cost change from a year ago"
+      },
+      "forecast_bill": {
+        "name": "Forecast bill this period"
+      },
+      "forecast_next_bill": {
+        "name": "Forecast next bill"
+      },
+      "usage_anomalies": {
+        "name": "Unusual usage days"
       }
     }
   }

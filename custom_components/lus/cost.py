@@ -275,23 +275,6 @@ def fill_gaps(hours: Iterable[HourlyUsage]) -> list[HourlyUsage]:
     return filled
 
 
-def fill_gaps(hours: Iterable[HourlyUsage]) -> list[HourlyUsage]:
-    """`hours` with a zero-use hour for each one missing between them.
-
-    The meter data can skip hours, but the bill's fixed charges and the other
-    meters' charges don't stop for them, so costs are worked out over every hour.
-    """
-    filled: list[HourlyUsage] = []
-    for h in hours:
-        if filled:
-            t = next_hour(filled[-1].start)
-            while t < h.start:
-                filled.append(HourlyUsage(t.astimezone(SITE_TZ), 0.0))
-                t = next_hour(t)
-        filled.append(h)
-    return filled
-
-
 def electricity_costs(
     hours: Iterable[HourlyUsage], rates: Rates | RateSchedule
 ) -> list[HourlyUsage]:

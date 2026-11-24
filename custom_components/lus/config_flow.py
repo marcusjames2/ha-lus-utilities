@@ -26,9 +26,9 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from .api import LusAuthError, LusClient, LusError
 from homeassistant.util import dt as dt_util
 
+from .api import LusAuthError, LusClient, LusError
 from .const import CONF_RECALCULATE_FROM, DOMAIN
 from .cost import SITE_TZ, BillingCycles, Rates, RateSchedule, cycle_bounds
 
@@ -58,7 +58,10 @@ class LusConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _async_validate(self, username: str, password: str) -> tuple[str | None, str | None]:
         """Return (account id, error key)."""
-        client = LusClient(async_create_clientsession(self.hass), username, password)
+        # A session of its own for the check, released straight after, so the
+        # portal's cookies for this sign-in don't stay in memory until restart.
+        session = async_create_clientsession(self.hass, auto_cleanup=False)
+        client = LusClient(session, username, password)
         try:
             await client.async_login()
             meters = await client.async_get_meters()
@@ -67,6 +70,8 @@ class LusConfigFlow(ConfigFlow, domain=DOMAIN):
         except (LusError, aiohttp.ClientError, TimeoutError):
             _LOGGER.exception("Could not reach the LUS portal")
             return None, "cannot_connect"
+        finally:
+            session.detach()
         if not meters:
             return None, "no_meters"
         return client.account_id, None
@@ -89,7 +94,11 @@ class LusConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
         return self.async_show_form(
             step_id="user",
-            data_schema=self.add_suggested_values_to_schema(USER_SCHEMA, user_input),
+            # After an error, put the username back but never the password.
+            data_schema=self.add_suggested_values_to_schema(
+                USER_SCHEMA,
+                {CONF_USERNAME: user_input[CONF_USERNAME]} if user_input else None,
+            ),
             errors=errors,
         )
 

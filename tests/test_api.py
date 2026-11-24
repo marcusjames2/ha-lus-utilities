@@ -519,3 +519,123 @@ async def test_bad_password_raises_auth_error():
     )
     with pytest.raises(LusAuthError):
         await LusClient(session, "user", "bad").async_login()
+
+
+# --- Failure handling --------------------------------------------------------
+
+
+async def test_rejected_token_right_after_login_does_not_log_in_again():
+    # The portal issues a token, then refuses it. Logging in again from inside
+    # the login would repeat without end, posting the password each time.
+    session = FakeSession(
+        [("POST", LOGIN, 200, {"sessionToken": "tok-1"}), ("GET", PRIMARY, 401, {})]
+    )
+    with pytest.raises(LusAuthError):
+        await LusClient(session, "user", "pw").async_login()
+    assert len(session.sent(LOGIN)) == 1
+
+
+async def test_blocked_login_is_not_reported_as_a_bad_password():
+    # A 403 with no JSON error is a firewall or outage page.
+    session = FakeSession([("POST", LOGIN, 403, "<html>Access denied</html>")])
+    with pytest.raises(LusError) as err:
+        await LusClient(session, "user", "pw").async_login()
+    assert not isinstance(err.value, LusAuthError)
+
+    session = FakeSession([("POST", LOGIN, 200, "<html>Maintenance</html>")])
+    with pytest.raises(LusError) as err:
+        await LusClient(session, "user", "pw").async_login()
+    assert not isinstance(err.value, LusAuthError)
+
+
+async def test_rejected_login_with_any_error_shape_is_an_auth_error():
+    for status, body in (
+        (403, {"error": {"serviceErrorCode": "ACCOUNT_LOCKED"}}),
+        (401, {"error": "Unauthorized"}),
+        (401, "Unauthorized"),
+    ):
+        session = FakeSession([("POST", LOGIN, status, body)])
+        with pytest.raises(LusAuthError):
+            await LusClient(session, "user", "pw").async_login()
+
+
+async def test_login_response_without_an_account_is_an_error():
+    session = FakeSession(
+        [("POST", LOGIN, 200, {"sessionToken": "tok-1"}), ("GET", PRIMARY, 200, {})]
+    )
+    with pytest.raises(LusError, match="no id"):
+        await LusClient(session, "user", "pw").async_login()
+
+
+async def logged_in(extra: list) -> tuple[LusClient, FakeSession, list]:
+    session = FakeSession(login_responses() + [("GET", META, 200, METADATA), *extra])
+    client = LusClient(session, "user", "pw")
+    await client.async_login()
+    return client, session, await client.async_get_meters()
+
+
+async def test_page_that_is_not_json_is_an_error_not_an_empty_day():
+    client, _, meters = await logged_in([("GET", READS, 200, "<html>Maintenance</html>")])
+    with pytest.raises(LusError, match="Malformed reads response"):
+        await client.async_get_reads(meters[0], date(2026, 10, 26), date(2026, 10, 27))
+
+
+async def test_errors_leave_out_the_meter_id_and_survive_any_error_shape():
+    for body in ({"error": "Internal Server Error"}, {"error": {"details": "boom"}}, None):
+        client, _, meters = await logged_in([("GET", READS, 500, body)])
+        with pytest.raises(LusError) as err:
+            await client.async_get_reads(meters[0], date(2026, 10, 26), date(2026, 10, 27))
+        assert "HTTP 500" in str(err.value)
+        assert "elec-uuid" not in str(err.value)
+
+
+async def test_every_request_has_a_timeout():
+    _, session, _ = await logged_in([])
+    assert all(kwargs["timeout"].total == 60 for _, _, kwargs in session.calls)
+
+
+def test_malformed_portal_data_is_a_portal_error():
+    with pytest.raises(LusError):
+        parse_meters({"fuelTypeServicePoint": {"ELECTRICITY": [{"hasAmiUsage": True}]}})
+    with pytest.raises(LusError):
+        parse_reads({"reads": [{"consumption": {"value": 1.0}, "startTime": "yesterday"}]})
+
+
+def hourly_reads(start: datetime, count: int) -> list[Read]:
+    step = timedelta(hours=1)
+    return [Read(start + i * step, start + (i + 1) * step, 10.0) for i in range(count)]
+
+
+def test_to_hourly_waits_for_an_hour_with_no_reads_at_all():
+    # The water meter's 10:00 read hasn't reached the portal yet. Importing
+    # the hours after it would leave 10:00 empty for good.
+    start = datetime(2026, 10, 26, tzinfo=CDT)
+    reads = hourly_reads(start, 24)
+    del reads[10]
+    hours = to_hourly(reads, reads_per_hour=1)
+    assert [h.start for h in hours] == [start + timedelta(hours=i) for i in range(10)]
+
+    quarter = [r for r in quarter_reads(start, 4 * 24) if r.start.hour != 10]
+    assert len(to_hourly(quarter, reads_per_hour=4)) == 10
+
+
+def test_to_hourly_steps_over_an_old_hour_with_no_reads():
+    start = datetime(2026, 10, 20, tzinfo=CDT)
+    reads = hourly_reads(start, 24 * 5)
+    del reads[10]
+    hours = to_hourly(reads, reads_per_hour=1)
+    assert len(hours) == 24 * 5 - 1
+    assert start + timedelta(hours=10) not in [h.start for h in hours]
+
+
+async def test_rejected_token_on_the_second_lookup_does_not_log_in_again():
+    session = FakeSession(
+        [
+            ("POST", LOGIN, 200, {"sessionToken": "tok-1"}),
+            ("GET", PRIMARY, 200, {"id": "1000000099"}),
+            ("GET", CURRENT, 401, {}),
+        ]
+    )
+    with pytest.raises(LusAuthError):
+        await LusClient(session, "user", "pw").async_login()
+    assert len(session.sent(LOGIN)) == 1

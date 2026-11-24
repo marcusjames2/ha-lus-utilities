@@ -40,11 +40,13 @@ from .api import (
     Meter,
     to_hourly,
 )
+from .analytics import Insights, build_insights, build_ledger
 from .const import (
     CHUNK_DAYS,
     CONF_RECALCULATE_FROM,
     DEFAULT_BACKFILL,
     DOMAIN,
+    INSIGHTS_HISTORY,
     RECALCULATE_LOOKBACK,
     UPDATE_INTERVAL,
     WINTER_SETTLE,
@@ -95,6 +97,8 @@ class LusData:
     current: BillEstimate
     previous: BillEstimate
     winter_average: WinterAverageData
+    # None until there is usage to analyse, or if the analysis failed.
+    insights: Insights | None = None
 
 
 @dataclass(frozen=True)
@@ -159,10 +163,14 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
         self._bill_ends: dict[str, datetime] = {}
         # The account's billing cycles as of the last update, for the options flow.
         self.cycles: BillingCycles | None = None
+        # Hourly usage per meter for the spending insights, kept between
+        # updates so stored statistics are only read once after start-up.
+        self._history: dict[str, dict[datetime, float]] = {}
 
     async def _async_update_data(self) -> LusData | None:
         self._winter_results = {}
-        rates = RateSchedule.from_options(self.config_entry.options)
+        started_with = dict(self.config_entry.options)
+        rates = RateSchedule.from_options(started_with)
         # After rates change, costs from this point on are recomputed and
         # overwrite what's stored; earlier hours are left as they are.
         requested = self._recalculate_from()
@@ -192,6 +200,7 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
             total_id = total_cost_statistic_id(self.client.account_id)
             total_last = await self._async_last(total_id, recalculate_from)
             costs = []
+            usage: dict[Meter, list[HourlyUsage]] = {}
             for meter in meters:
                 meter_costs = await self._async_import_meter(
                     meter,
@@ -199,6 +208,7 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
                     total_last,
                     recalculate_from,
                     account_rates.cycles,
+                    usage,
                 )
                 if meter_costs is not None:
                     costs.append(meter_costs)
@@ -223,17 +233,27 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
             current, previous = bill_estimates(
                 totals, account_rates.cycles, dt_util.now(SITE_TZ)
             )
-            data = LusData(self.client.account_id, current, previous, winter_data)
+            data = LusData(
+                self.client.account_id,
+                current,
+                previous,
+                winter_data,
+                await self._async_insights(usage, meter_rates, account_rates),
+            )
         self.cycles = account_rates.cycles
         self._bill_ends.update(bill_ends)
         if requested is not None:
             _LOGGER.info("Recalculated costs from %s", requested)
-            options = {
-                k: v
-                for k, v in self.config_entry.options.items()
-                if k != CONF_RECALCULATE_FROM
-            }
-            self.hass.config_entries.async_update_entry(self.config_entry, options=options)
+            # Rates saved while this update ran ask for a recalculation of
+            # their own. Clearing the request now would drop it, and writing
+            # back the options read at the start would drop the rates too.
+            if dict(self.config_entry.options) == started_with:
+                options = {
+                    k: v for k, v in started_with.items() if k != CONF_RECALCULATE_FROM
+                }
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, options=options
+                )
         return data
 
     async def _async_meter_rates(
@@ -270,8 +290,12 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
         total_last: LastStat,
         recalculate_from: datetime | None = None,
         account_cycles: int | BillingCycles | None = None,
+        usage: dict[Meter, list[HourlyUsage]] | None = None,
     ) -> list[HourlyUsage] | None:
-        """Import consumption and, for billed meters, cost. Returns the cost hours."""
+        """Import consumption and, for billed meters, cost. Returns the cost hours.
+
+        A billed meter's usage hours are also put in `usage`, when given.
+        """
         consumption_id = statistic_id(meter)
         cost_fn = _COST_FUNCTIONS.get(meter.fuel_type)
         cost_id = cost_statistic_id(meter) if cost_fn else None
@@ -319,6 +343,8 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
         )
         if not cost_id:
             return None
+        if usage is not None:
+            usage[meter] = hours
 
         cost_hours = fill_gaps(hours)
         if meter.fuel_type == FUEL_WATER:
@@ -449,15 +475,16 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
     async def _async_last(self, stat_id: str, before: datetime | None = None) -> LastStat:
         """The last stored hour, or the last one before `before` when given.
 
-        With `before`, nothing found in the lookback window means everything is
-        recomputed from the start of history.
+        With `before`, nothing stored earlier means everything is recomputed
+        from the start of history.
         """
+        recorder = get_instance(self.hass)
         if before is None:
-            rows = await get_instance(self.hass).async_add_executor_job(
+            rows = await recorder.async_add_executor_job(
                 get_last_statistics, self.hass, 1, stat_id, True, {"sum"}
             )
         else:
-            rows = await get_instance(self.hass).async_add_executor_job(
+            rows = await recorder.async_add_executor_job(
                 statistics_during_period,
                 self.hass,
                 before - RECALCULATE_LOOKBACK,
@@ -467,10 +494,113 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
                 None,
                 {"sum"},
             )
+            if not rows or not rows.get(stat_id):
+                # Nothing in the weeks before the date: it is in the future,
+                # or follows a long gap. The running sum still has to carry
+                # on from whatever is stored earlier, however far back, or
+                # the rewritten hours would restart from zero mid-history.
+                rows = await recorder.async_add_executor_job(
+                    statistics_during_period,
+                    self.hass,
+                    dt_util.utc_from_timestamp(0),
+                    before - RECALCULATE_LOOKBACK,
+                    {stat_id},
+                    # Hourly, not a coarser period: those are widened to whole
+                    # days or months and would take in hours after `before`.
+                    "hour",
+                    None,
+                    {"sum"},
+                )
         if not rows or not rows.get(stat_id):
             return None, 0.0
         row = rows[stat_id][-1]
         return dt_util.utc_from_timestamp(row["start"]), row["sum"] or 0.0
+
+    async def _async_insights(
+        self,
+        usage: dict[Meter, list[HourlyUsage]],
+        meter_rates: Mapping[str, RateSchedule],
+        account_rates: RateSchedule,
+    ) -> Insights | None:
+        """Analyse spending over the usage history.
+
+        Insights are an extra on top of the statistics import, so a failure
+        here is logged and leaves their sensors unknown instead of failing
+        the update.
+        """
+        try:
+            now = dt_util.now(SITE_TZ)
+            oldest = now - INSIGHTS_HISTORY
+            series = []
+            for meter, hours in usage.items():
+                history = self._history.get(meter.uuid)
+                if history is None:
+                    # First update since start-up: hours older than this
+                    # update fetched come from the stored statistics.
+                    before = hours[0].start if hours else now
+                    history = await self._async_stored_usage(
+                        statistic_id(meter), oldest, before
+                    )
+                    self._history[meter.uuid] = history
+                history.update((h.start, h.value) for h in hours)
+                for stale in [start for start in history if start < oldest]:
+                    del history[stale]
+                rates = meter_rates.get(meter.uuid, account_rates)
+                # Winter averages already read for this meter's bills set its
+                # tier-1 limit; others are worked out from the history itself.
+                winters = {
+                    winter: average
+                    for (uuid, winter, bills), average in self._winters.items()
+                    if uuid == meter.uuid
+                    and average
+                    and bills == tuple(winter_cycles(winter, rates.cycles))
+                }
+                series.append(
+                    (
+                        meter.fuel_type,
+                        [HourlyUsage(s, v) for s, v in history.items()],
+                        winters,
+                        rates,
+                    )
+                )
+            return await self.hass.async_add_executor_job(
+                _build_insights, series, account_rates, now
+            )
+        except Exception:  # noqa: BLE001 - must never break the import
+            _LOGGER.exception("Could not work out LUS spending insights")
+            return None
+
+    async def _async_stored_usage(
+        self, stat_id: str, start: datetime, end: datetime
+    ) -> dict[datetime, float]:
+        """Stored hourly usage for a statistic, by the start of each hour."""
+        if end <= start:
+            return {}
+        rows = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            start,
+            end,
+            {stat_id},
+            "hour",
+            {
+                EnergyConverter.UNIT_CLASS: UnitOfEnergy.KILO_WATT_HOUR,
+                VolumeConverter.UNIT_CLASS: UnitOfVolume.GALLONS,
+            },
+            {"state", "sum"},
+        )
+        usage: dict[datetime, float] = {}
+        previous_sum: float | None = None
+        for row in (rows or {}).get(stat_id, []):
+            value = row.get("state")
+            total = row.get("sum")
+            if value is None and total is not None and previous_sum is not None:
+                # Rows without a state still carry the running sum.
+                value = total - previous_sum
+            previous_sum = total if total is not None else previous_sum
+            if value is not None:
+                usage[dt_util.utc_from_timestamp(row["start"])] = value
+        return usage
 
     @staticmethod
     def _resume_date(
@@ -544,6 +674,15 @@ def total_costs(
         HourlyUsage(hour, sum(m[hour] for m in by_meter) + garbage_cost(hour, rates))
         for hour in sorted(common)
     ]
+
+
+def _build_insights(
+    series: list[tuple[str, list[HourlyUsage], dict[int, float], RateSchedule]],
+    rates: RateSchedule,
+    now: datetime,
+) -> Insights:
+    """Cost out the usage history and analyse it; run off the event loop."""
+    return build_insights(build_ledger(series, rates), rates, now)
 
 
 def _chunks(start: date, end: date, days: int) -> list[tuple[date, date]]:
