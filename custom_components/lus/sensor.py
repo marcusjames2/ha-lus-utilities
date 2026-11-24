@@ -177,4 +177,6 @@ class LusWinterAverageSensor(CoordinatorEntity[LusCoordinator], SensorEntity):
         return {
             "winter_year": winter.year,
             "water_meter_id": winter.water_meter_id,
+            # False when gaps in the reads leave some winter bills out.
+            "complete": winter.complete,
         }

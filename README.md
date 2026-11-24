@@ -65,10 +65,12 @@ from your bill's rates and adds three more statistics:
   `winter_year` attribute is the year of the March bill and its
   `water_meter_id` identifies the source meter. The sensor uses the latest
   completed winter (the current year from April through December, or the prior
-  year from January through March). It remains unknown when there is no water
-  meter, no usable reads, or the winter is incomplete. A bill missing up to a
-  day of reads is scaled up to its whole cycle; one missing more is left out of
-  the average.
+  year from January through March). A bill missing up to a day of reads is
+  scaled up to its whole cycle; one missing more is left out of the average,
+  and the `complete` attribute is then false. The sensor shows the same
+  average the tier-1 limit uses, and is unknown when there is no water meter,
+  no winter bill with usable reads, or the March bill's reads can still come
+  in.
   Until the March bill's reads are all in (at most a week), the cost of later
   hours waits for them. With no reads from that winter, summer bills have no
   tiers and are charged wastewater on every gallon.

@@ -168,7 +168,7 @@ def test_winter_average_sensor_reports_gallons_and_source():
         "5000000000",
         current,
         previous,
-        coord.WinterAverageData(2026, "1000000002", 20470.456),
+        coord.WinterAverageData(2026, "1000000002", 20470.456, True),
     )
     sensor = LusWinterAverageSensor(SimpleNamespace(data=data), "5000000000")
 
@@ -178,7 +178,22 @@ def test_winter_average_sensor_reports_gallons_and_source():
     assert sensor.extra_state_attributes == {
         "winter_year": 2026,
         "water_meter_id": "1000000002",
+        "complete": True,
     }
+
+
+def test_winter_average_sensor_reports_partial_winter():
+    current, previous = bill_estimates(HOURS, 23, NOW)
+    data = coord.LusData(
+        "5000000000",
+        current,
+        previous,
+        coord.WinterAverageData(2026, "1000000002", 21000.0, False),
+    )
+    sensor = LusWinterAverageSensor(SimpleNamespace(data=data), "5000000000")
+
+    assert sensor.native_value == 21000.0
+    assert sensor.extra_state_attributes["complete"] is False
 
 
 def test_winter_average_sensor_is_unknown_without_usable_complete_reads():
@@ -192,6 +207,7 @@ def test_winter_average_sensor_is_unknown_without_usable_complete_reads():
     assert sensor.extra_state_attributes == {
         "winter_year": 2026,
         "water_meter_id": None,
+        "complete": False,
     }
 
 

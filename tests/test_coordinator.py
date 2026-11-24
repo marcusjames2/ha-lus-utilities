@@ -359,8 +359,37 @@ async def test_manual_tier_limit_does_not_refetch_old_incomplete_winter(harness)
         [WATER], Rates(water_tier1_gallons=20000), date(2026, 10, 27)
     )
 
-    assert first == again == coord.WinterAverageData(2026, "1000000002", None)
+    # Settled: the sensor shows the average over the covered bills, as the
+    # summer tier-1 limit uses it, and says the winter is incomplete.
+    assert first == again
+    assert first.water_meter_id == "1000000002"
+    assert first.gallons == pytest.approx(30 * (720 + 744 + 744) / 3)
+    assert first.complete is False
     assert winter_requests(c) == WINTER_REQUESTS
+
+
+async def test_incomplete_winter_is_unknown_while_its_reads_can_still_come_in(
+    harness,
+):
+    # Bills on the 28th: the March bill ends March 28, so on April 1 its
+    # reads can still come in.
+    rates = Rates(water_tier1_gallons=20000, billing_day=28)
+    reads = without_march_18_to_20(
+        hourly_reads(
+            datetime(2025, 11, 28, tzinfo=SITE_TZ),
+            datetime(2026, 3, 28, tzinfo=SITE_TZ),
+            30.0,
+        )
+    )
+    c = harness.make(reads)
+
+    early = await c._async_account_winter_average([WATER], rates, date(2026, 4, 1))
+    c._winter_results = {}  # simulate a later coordinator update
+    later = await c._async_account_winter_average([WATER], rates, date(2026, 4, 10))
+
+    assert early == coord.WinterAverageData(2026, "1000000002", None, False)
+    assert later.gallons is not None
+    assert later.complete is False
 
 
 async def test_account_winter_reuses_calculation_with_manual_limit(harness):
@@ -383,6 +412,7 @@ async def test_account_winter_reuses_calculation_with_manual_limit(harness):
     assert result.year == 2026
     assert result.water_meter_id == "1000000002"
     assert result.gallons == pytest.approx(30 * (720 + 744 + 744 + 671) / 4)
+    assert result.complete is True
     assert winter_requests(c) == WINTER_REQUESTS
 
 

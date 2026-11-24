@@ -103,7 +103,12 @@ class WinterAverageData:
 
     year: int
     water_meter_id: str | None
+    # The average the summer bills' tier-1 limit uses: over the winter bills
+    # the reads cover, once the winter has settled. None while the last bill's
+    # reads can still come in, or if no winter bill is covered.
     gallons: float | None
+    # The reads cover every winter bill.
+    complete: bool = False
 
 # (start of the last stored hour, its running sum); (None, 0.0) if none stored.
 type LastStat = tuple[datetime | None, float]
@@ -379,10 +384,14 @@ class LusCoordinator(DataUpdateCoordinator[LusData | None]):
         cycles = as_schedule((meter_rates or {}).get(meter.uuid, rates)).cycles
         bills = tuple(winter_cycles(winter, cycles))
         average, complete = await self._async_winter_result(meter, winter, bills, today)
+        # As for the tier-1 limit: a winter with gaps in its reads still counts,
+        # averaged over the bills that are covered, once its reads have settled.
+        settled = today - bills[-1][1].date() > WINTER_SETTLE
         return WinterAverageData(
             winter,
             meter.utility_account_id,
-            average if complete else None,
+            average if complete or settled else None,
+            complete,
         )
 
     async def _async_winter_result(

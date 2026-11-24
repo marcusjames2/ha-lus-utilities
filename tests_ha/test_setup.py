@@ -125,6 +125,7 @@ async def test_setup_creates_bill_sensors_and_statistics(
     assert winter.attributes["friendly_name"] == "LUS Winter water average"
     assert winter.attributes["winter_year"] == 2026
     assert winter.attributes["water_meter_id"] == "1000000002"
+    assert winter.attributes["complete"] is True
     assert float(winter.state) == pytest.approx(30 * (720 + 744 + 744 + 671) / 4)
 
     # Default rates, 9/24-10/24 by the bills: electric 2 kWh/h and water 30 gal/h for 30 days.
